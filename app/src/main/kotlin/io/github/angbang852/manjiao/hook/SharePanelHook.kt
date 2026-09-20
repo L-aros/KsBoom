@@ -24,7 +24,10 @@ object SharePanelHook {
 
     private const val TAG_OVERLAY = "slowkick_overlay"
     private const val TAG_ENTRY = "slowkick_entry"
-    private const val MAX_RETRY = 50
+    // ★ 50→12（审阅 2026-09）：本 hook 挂在 Dialog.show 上，无关对话框也走
+    // 100ms×50=5 秒的全树扫描重试（主线程空转）。分享面板布局在 1 秒内必然稳定，
+    // 12 次（1.2s）足够命中；未命中说明本就不是分享面板，及时止损
+    private const val MAX_RETRY = 12
     private const val RETRY_MS = 100L
     private val handler = Handler(Looper.getMainLooper())
 

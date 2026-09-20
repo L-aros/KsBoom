@@ -31,6 +31,7 @@ import io.github.angbang852.manjiao.data.CurrentVideo
 import io.github.angbang852.manjiao.data.DownloadService
 import io.github.angbang852.manjiao.data.Prefs
 import io.github.angbang852.manjiao.hook.ContentFilterHook
+import io.github.angbang852.manjiao.hook.VideoDownloaderHook
 import io.github.angbang852.manjiao.util.Logger
 
 
@@ -70,8 +71,19 @@ object MainMenuDialog {
     }
 
     fun show(ctx: Context) {
+        // ★ 延迟构建（审阅 2026-09 P2）：本方法常在触摸分发（GestureHook.dispatchTouchEvent）
+        // 内被调用——同步建 UI + measure + Dialog.show 是 jank/ANR 面。整体投递到
+        // 主线程队列，等分发结束后再构建（仍在主线程，View 操作安全）
+        android.os.Handler(android.os.Looper.getMainLooper()).post { showNow(ctx) }
+    }
+
+    private fun showNow(ctx: Context) {
+        // ★ 防双开（抖鸡对齐）：活动级 + decor 兜底双路径可能同时命中
+        if (currentOverlay != null) { Logger.d("menu already showing, skip"); return }
         Logger.d("MainMenuDialog.show called")
-        Prefs.reload()  // 仅主菜单入口刷新：子页共用内存缓存（广播即时同步），子页 reload 是纯冗余的主线程同步 IO
+        // ★ 异步刷新（流畅度）：广播链路已即时同步内存缓存，菜单先显示缓存值；
+        // 文件兜底拉取后台化（原同步 FUSE 读 5-50ms 是点开菜单的掉帧源）
+        Prefs.reloadAsync()
         val items = listOf(
             Item("", "刷新内容", hasSub = false) { ContentFilterHook.refreshContent() },
             Item("", "下载") { showDownload(ctx) },
@@ -85,25 +97,63 @@ object MainMenuDialog {
         showSheet(ctx, "ManJiao", items, null)
     }
 
+    // ★ 每次点下载都强制用「当前可见页」刷新（2026-09 修复下错视频）：旧逻辑只在
+    // CurrentVideo 无效时捕获——下载过一次后恒有效，划到新视频也复用旧 URL
+    private fun ensureCapture(v: io.github.angbang852.manjiao.data.VideoInfo): io.github.angbang852.manjiao.data.VideoInfo {
+        val ph = try { ContentFilterHook.currentFeedPhoto() } catch (_: Throwable) { null }
+        if (ph != null) {
+            try { VideoDownloaderHook.extractFromPhoto(ph, ContentFilterHook.currentFeedFragment()) } catch (_: Throwable) {}
+            return CurrentVideo.current
+        }
+        return v
+    }
+
     private fun showDownload(ctx: Context) {
-        val v = CurrentVideo.current
-        val valid = v.valid()
-        val items = listOf(
-            Item("", "视频下载", hasSub = false) {
-                if (!valid) { toast(ctx, "未捕获到视频，请先播放视频"); return@Item }
-                val dir = Prefs.str(Prefs.K_DL_PATH, Prefs.DEFAULT_PATH)
-                DownloadService.downloadVideo(ctx, v, dir)
-            },
-            Item("", "音频提取", hasSub = false) {
-                if (!valid) { toast(ctx, "未捕获到视频，请先播放视频"); return@Item }
-                val dir = Prefs.str(Prefs.K_DL_PATH, Prefs.DEFAULT_PATH)
-                DownloadService.downloadAudio(ctx, v, dir)
-            },
-            Item("", "图集下载", hasSub = false) {
-                if (v.isImage) { DownloadService.downloadImages(ctx, v, Prefs.str(Prefs.K_DL_PATH, Prefs.DEFAULT_PATH)) }
-                else { toast(ctx, "当前不是图集，请左右滑动到图片集") }
-            },
-        )
+        val entries = try { ContentFilterHook.visibleEntries() } catch (_: Throwable) { emptyList<ContentFilterHook.VisEntry>() }
+        val items = ArrayList<Item>()
+        // ★ 首选：分享链接路线（用户方案）——分享→复制链接后，链接即快手认定的
+        // 「这条视频」，photoId 零歧义。解析走后台线程
+        items.add(Item("", "分享链接的视频（先分享→复制链接）", hasSub = false) {
+            toast(ctx, "正在解析分享链接…")
+            Thread {
+                val info = try { VideoDownloaderHook.shareVideoInfo(ctx) } catch (_: Throwable) { null }
+                if (info == null || !info.valid()) {
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        toast(ctx, "解析失败：请先在视频页分享→复制链接")
+                    }
+                    return@Thread
+                }
+                DownloadService.downloadVideo(ctx, info, Prefs.str(Prefs.K_DL_PATH, Prefs.DEFAULT_PATH))
+            }.apply { name = "MJ-ShareDL"; isDaemon = true }.start()
+        })
+        // 最近看过的条目：图集直接下图片；视频进二级菜单选 视频/音频
+        for (e in entries) {
+            val isImg = try { VideoDownloaderHook.isImagePhoto(e.photo) } catch (_: Throwable) { false }
+            val label = (if (e.caption.isNotBlank()) e.caption.take(14) else "无文案") + " · " + e.user.take(8)
+            if (isImg) {
+                items.add(Item("", "图集：$label", hasSub = false) {
+                    val info = try { VideoDownloaderHook.extractToInfo(e.photo, e.frag, false) } catch (_: Throwable) { null }
+                    if (info == null || info.imageUrls.isEmpty()) { toast(ctx, "该图集未捕获到图片"); return@Item }
+                    DownloadService.downloadImages(ctx, info, Prefs.str(Prefs.K_DL_PATH, Prefs.DEFAULT_PATH))
+                })
+            } else {
+                items.add(Item("", label, hasSub = false) {
+                    showSheet(ctx, label, listOf(
+                        Item("", "视频下载", hasSub = false) {
+                            val info = try { VideoDownloaderHook.extractToInfo(e.photo, e.frag, false) } catch (_: Throwable) { null }
+                            if (info == null || !info.valid()) { toast(ctx, "该条未捕获到链接"); return@Item }
+                            DownloadService.downloadVideo(ctx, info, Prefs.str(Prefs.K_DL_PATH, Prefs.DEFAULT_PATH))
+                        },
+                        Item("", "音频提取", hasSub = false) {
+                            val info = try { VideoDownloaderHook.extractToInfo(e.photo, e.frag, false) } catch (_: Throwable) { null }
+                            if (info == null || !info.valid()) { toast(ctx, "该条未捕获到链接"); return@Item }
+                            DownloadService.downloadAudio(ctx, info, Prefs.str(Prefs.K_DL_PATH, Prefs.DEFAULT_PATH))
+                        }
+                    ), { showDownload(ctx) })
+                })
+            }
+        }
+        if (items.size == 1) { toast(ctx, "未捕获到视频，请先播放视频"); return }
         showSheet(ctx, "下载", items, { show(ctx) })
     }
 

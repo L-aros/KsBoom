@@ -68,6 +68,25 @@ object ImmersiveHook {
     }
 
 
+    // ★ 监听所挂 decor 弱引用（审阅 2026-09 P3）：stop 只在 tracked===act 时移除，
+    // B 顶 A 时 A 的监听残留泄漏——记录挂载点，start 前先对旧 decor 反注册
+    @Volatile private var vtoDecor: android.view.View? = null
+
+    // ★ GOLD id 解析缓存（流畅度）：onlyGoldOn 每轮 pass 对 14 个 id × 2 命名空间
+    // 调 getIdentifier（资源表字符串查找，主线程）——进程内资源 id 恒定，解析一次
+    // 查表即可；未命中(0)也缓存，避免每轮空查
+    private val goldIdCache = java.util.HashMap<String, Int>()
+
+    private fun goldId(act: Activity, gn: String): Int {
+        synchronized(goldIdCache) {
+            goldIdCache[gn]?.let { return it }
+            val gid = act.resources.getIdentifier(gn, "id", act.packageName)
+                .takeIf { it != 0 } ?: act.resources.getIdentifier(gn, "id", KsClass.PKG)
+            goldIdCache[gn] = gid
+            return gid
+        }
+    }
+
     private fun start(act: Activity) {
         active = true
         tracked = act
@@ -82,9 +101,18 @@ object ImmersiveHook {
                 decor.postDelayed({ dumpUi(act) }, 1200)
             }
             Logger.safe("vto") {
+                // 幂等：先从旧挂载点（若有）与当前 decor 反注册同实例再注册，
+                // 防 B 顶 A 场景 A 的监听泄漏 + 同实例重复注册
+                vtoDecor?.viewTreeObserver?.let { old ->
+                    try { old.removeOnScrollChangedListener(scrollListener) } catch (_: Throwable) {}
+                    try { old.removeOnGlobalLayoutListener(layoutListener) } catch (_: Throwable) {}
+                }
                 val vto = decor.viewTreeObserver
+                vto.removeOnScrollChangedListener(scrollListener)
+                vto.removeOnGlobalLayoutListener(layoutListener)
                 vto.addOnScrollChangedListener(scrollListener)
                 vto.addOnGlobalLayoutListener(layoutListener)
+                vtoDecor = decor
             }
         }
         handler.removeCallbacks(hideTask)
@@ -92,17 +120,19 @@ object ImmersiveHook {
     }
 
     private fun stop(act: Activity) {
+        // 反注册不依赖 tracked 身份：任何 stop 都清掉自己 decor 上的监听
+        vtoDecor?.viewTreeObserver?.let { vto ->
+            Logger.safe("vtoOff") {
+                try { vto.removeOnScrollChangedListener(scrollListener) } catch (_: Throwable) {}
+                try { vto.removeOnGlobalLayoutListener(layoutListener) } catch (_: Throwable) {}
+            }
+        }
+        vtoDecor = null
         if (tracked === act) {
             active = false
             tracked = null
             handler.removeCallbacks(hideTask)
             handler.removeCallbacks(quickHide)
-            Logger.safe("vtoOff") {
-                val decor = act.window.decorView
-                val vto = decor.viewTreeObserver
-                vto.removeOnScrollChangedListener(scrollListener)
-                vto.removeOnGlobalLayoutListener(layoutListener)
-            }
         }
     }
 
@@ -128,18 +158,26 @@ object ImmersiveHook {
 
     private val hideTask = object : Runnable {
         override fun run() {
-            val act = tracked
-            if (act != null) {
-                // 只比模式（内存 Prefs 读取，微秒级）；模式变了或有布局/滚动变化才全树
-                val modeNow = if (Prefs.bool(Prefs.K_IMM_ON, false)) 1
-                    else if (Prefs.bool(Prefs.K_IMM_CUSTOM, false) || anyCustomSubOn()) 2 else 0
-                if (modeNow != lastMode || vtreeDirty || firstRestore) {
-                    vtreeDirty = false
-                    hideByConfig(act)
+            // ★ 全项目唯一无兜底主线程入口（审阅 2026-09 P1）：hideByConfig 内部任何
+            // RuntimeException 会直接崩快手进程——整段 try/catch，重排放 finally
+            // 保证轮询永不中断
+            try {
+                val act = tracked
+                if (act != null) {
+                    // 只比模式（内存 Prefs 读取，微秒级）；模式变了或有布局/滚动变化才全树
+                    val modeNow = if (Prefs.bool(Prefs.K_IMM_ON, false)) 1
+                        else if (Prefs.bool(Prefs.K_IMM_CUSTOM, false) || anyCustomSubOn()) 2 else 0
+                    if (modeNow != lastMode || vtreeDirty || firstRestore) {
+                        vtreeDirty = false
+                        hideByConfig(act)
+                    }
                 }
+            } catch (t: Throwable) {
+                Logger.d("imm hideTask: " + t.javaClass.simpleName + ": " + t.message)
+            } finally {
+                // 全关时降频轮询（只读 Prefs 判断 mode，零遍历）；有开关开启才高频跑
+                if (active) handler.postDelayed(this, if (lastMode == 0) 3000 else if (onlyGoldOn()) 5000 else 2500)
             }
-            // 全关时降频轮询（只读 Prefs 判断 mode，零遍历）；有开关开启才高频跑
-            if (active) handler.postDelayed(this, if (lastMode == 0) 3000 else if (onlyGoldOn()) 5000 else 2500)
         }
     }
 
@@ -262,8 +300,7 @@ object ImmersiveHook {
                     // ★ 双命名空间兜底：硬编码主包命名空间在极速版（com.kuaishou.nebula）
                     // 上若资源表已随包名改名则恒返回 0，金币快速隐藏整体静默失效。
                     // 先查当前进程包名，未命中再回退主包（主包行为不变，极速版只增不减）
-                    val gid = actRef.resources.getIdentifier(gn, "id", actRef.packageName)
-                        .takeIf { it != 0 } ?: actRef.resources.getIdentifier(gn, "id", KsClass.PKG)
+                    val gid = goldId(actRef, gn)
                     if (gid != 0) {
                         val gv = actRef.findViewById(gid) as? View
                         if (gv != null && gv.visibility != View.GONE) { gv.visibility = View.GONE; c2++ }
@@ -350,16 +387,25 @@ object ImmersiveHook {
                     v.tag = null
                     v.setWillNotDraw(false)
                     v.invalidate()
-                    // 恢复子 view visibility（TabStripContainerLayout 的标签子项可能被 GONE）
+                    // 恢复子 view visibility：仅恢复带 HIDDEN_TAG（本模块隐藏标记）的
+                    // 子项——原实现无条件强制全部子 view VISIBLE，会顶掉快手自己
+                    // GONE 掉的角标/占位（审阅 2026-09 P2）
                     if (v is ViewGroup) {
                         var restored = 0
                         for (i in 0 until v.childCount) {
                             val child = v.getChildAt(i) ?: continue
-                            if (child.visibility != View.VISIBLE) { child.visibility = View.VISIBLE; restored++ }
+                            if (child.tag === HIDDEN_TAG) {
+                                child.tag = null
+                                if (child.visibility != View.VISIBLE) { child.visibility = View.VISIBLE; restored++ }
+                            }
                             if (child is ViewGroup) {
                                 for (j in 0 until child.childCount) {
                                     val gc = child.getChildAt(j) ?: continue
-                                    if (gc.visibility != View.VISIBLE) { gc.visibility = View.VISIBLE; restored++ }
+                                    // 同上：孙级也只恢复本模块标记过的
+                                    if (gc.tag === HIDDEN_TAG) {
+                                        gc.tag = null
+                                        if (gc.visibility != View.VISIBLE) { gc.visibility = View.VISIBLE; restored++ }
+                                    }
                                 }
                             }
                         }

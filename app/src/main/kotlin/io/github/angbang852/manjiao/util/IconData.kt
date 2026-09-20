@@ -19,6 +19,9 @@ object IconData {
 
     @Volatile private var cache: Drawable? = null
 
+    // ★ synchronized（审阅 2026-09 P3）：分享面板并发打开时原实现会重复解码
+    // Base64+绘制圆形图标（检查后赋值非原子）
+    @Synchronized
     fun get(ctx: Context): Drawable {
         cache?.let { return it }
         val bytes = Base64.decode(PNG_BASE64, Base64.DEFAULT)

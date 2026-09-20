@@ -28,7 +28,12 @@ object AntiAntiHook {
 
     private fun hookPm(xp: XposedInterface, cl: ClassLoader) {
         val pm = Reflect.findClass("android.app.ApplicationPackageManager", cl) ?: return
-        val m = Reflect.findMethod(pm, "getPackageInfo", 2) ?: return
+        // ★ 按参数类型精确选重载（审阅 2026-09 P2）：findMethod 按「名字+参数个数」
+        // 宽松匹配，declaredMethods 顺序不定时可能绑到 getPackageInfo(VersionedPackage,int)
+        // 重载 → args[0] as? String 恒 null，反检测 pm 路径静默失效
+        val m = pm.declaredMethods.firstOrNull {
+            it.name == "getPackageInfo" && it.parameterTypes.size == 2 && it.parameterTypes[0] == String::class.java
+        } ?: Reflect.findMethod(pm, "getPackageInfo", 2) ?: return
         xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("anti.pm").intercept { chain ->
             val n = chain.args[0] as? String
             if (n != null && n in HOOK_PKGS) {
@@ -40,7 +45,9 @@ object AntiAntiHook {
             chain.proceed()
         }
         Logger.safe("pm2") {
-            val m2 = Reflect.findMethod(pm, "getPackageInfoAsUser", 3) ?: return@safe
+            val m2 = pm.declaredMethods.firstOrNull {
+                it.name == "getPackageInfoAsUser" && it.parameterTypes.isNotEmpty() && it.parameterTypes[0] == String::class.java
+            } ?: Reflect.findMethod(pm, "getPackageInfoAsUser", 3) ?: return@safe
             xp.hook(m2).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("anti.pm2").intercept { chain ->
                 val n = chain.args[0] as? String
                 if (n != null && n in HOOK_PKGS) {
@@ -72,7 +79,15 @@ object AntiAntiHook {
                 // 匹配收窄：原 contains("su") 会误伤含 "su" 子串的正常命令
                 //（measure/summary 等），改为 su 词形边界
                 xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PASSTHROUGH).setId("anti.exec").intercept { chain ->
-                    val c = chain.args.firstOrNull()?.toString() ?: ""
+                    // ★ exec(String[]) 形式（审阅 2026-09 P2）：su/magisk 最典型的提权
+                    // 调用是数组形式，原实现只 toString 首参（数组 toString 无路径）
+                    // 完全匹配不到
+                    val a0 = chain.args.firstOrNull()
+                    val c = when (a0) {
+                        is Array<*> -> a0.filterNotNull().joinToString(" ") { it.toString() }
+                        null -> ""
+                        else -> a0.toString()
+                    }
                     if (c.startsWith("su") || c.contains("/su") || c.contains(" su") || c.contains("magisk")) throw IOException("denied")
                     chain.proceed()
                 }

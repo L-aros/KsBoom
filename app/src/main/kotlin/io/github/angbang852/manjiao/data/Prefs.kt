@@ -16,7 +16,8 @@ object Prefs {
     const val ACTION_PULL = "io.github.angbang852.manjiao.PREFS_PULL"
     /** signature 级自定义权限：快手进程内的配置接收器只接受持有者（本模块）的广播 */
     const val PERM_SYNC = "io.github.angbang852.manjiao.permission.PREFS_SYNC"
-    private const val OWN_PKG = "io.github.angbang852.manjiao"
+    // ★ 模块自身包名公开（PrefsWriteReceiver API34+ 发送方校验用）
+    const val OWN_PKG = "io.github.angbang852.manjiao"
     private const val MEDIA_DIR = "/sdcard/Android/media/io.github.angbang852.manjiao"
     private const val MEDIA_FILE = "$MEDIA_DIR/slowkick.properties"
     private const val PULL_INTERVAL_MS = 2000L
@@ -65,6 +66,8 @@ object Prefs {
     const val K_PERF_QUIET = "perf_quiet"
     const val K_PERF_SENSOR = "perf_sensor"
     const val K_PERF_LOGSPAM = "perf_logspam"
+    // ★ 诊断日志独立开关（S2 2026-09）：与 quiet 解耦，开诊断不拖垮性能
+    const val K_DIAG = "diag_debug"
 
     // 手势功能
     const val K_GS_NO_DBL_LIKE = "gs_no_dbl_like"
@@ -142,6 +145,13 @@ object Prefs {
     // media 文件（FUSE 路径 5-50ms），限频一过就随机掉帧一次。改为：getter 只读内存，
     // 文件刷新节流后丢到后台单线程；配置主通道仍是广播（applyRemote 即时生效）
     private fun schedulePull() {
+        // ★ mediaDead 优化（审阅 2026-09）：文件路已死时不再向 executor 投无效任务
+        // （每 2 秒一次的空转提交），但仍需驱动低频 query 通道——原实现里 query 是
+        // 由 pullRemote 的 mediaDead 分支发出的，直接掐断会断掉广播之外的全部同步
+        if (mediaDead) {
+            maybeSendQuery()
+            return
+        }
         val now = System.currentTimeMillis()
         if (now - lastPull < PULL_INTERVAL_MS) return
         lastPull = now
@@ -286,6 +296,15 @@ object Prefs {
         else mergeMediaIntoSp()
     }
 
+    // ★ 异步 reload（流畅度）：菜单打开等 UI 入口原先同步调 reload——remote 模式
+    // 是主线程 FUSE 文件读（5-50ms，点开菜单那一下的掉帧源）。改后台单线程执行，
+    // UI 先用内存缓存显示（广播链路 applyRemote 即时同步，缓存已足够新鲜）
+    fun reloadAsync() {
+        pullExecutor.execute {
+            try { if (remote) pullRemote(force = true) else mergeMediaIntoSp() } catch (_: Throwable) {}
+        }
+    }
+
     private fun remoteWriteMedia(type: String, key: String, value: Any?) {
         // ★ 后台化：media 文件读+全量重写此前在调用线程（常为主线程/菜单 UI），
         // FUSE 路径 5-50ms。cache 已先行更新，UI 不依赖写盘返回；lastPull 同步
@@ -371,6 +390,8 @@ object Prefs {
     }
 
     private fun sendWriteBroadcast(ctx: Context, type: String, key: String, value: Any?) {
+        // ★ XposedService 收编：广播之外加性写共享配置（目标进程内 libxposed 托管）
+        try { SyncService.push(type, key, value) } catch (_: Throwable) {}
         try {
             val i = Intent(ACTION_WRITE).setPackage(OWN_PKG)
                 .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
@@ -386,6 +407,9 @@ object Prefs {
     }
 
     fun sendUpdateBroadcast(ctx: Context, type: String, key: String, value: Any?) {
+        // ★ XposedService 收编：广播之外加性写共享配置（模块 App 进程写，目标进程
+        // 的变更监听直接收；service 未绑定时广播仍兜底）
+        try { SyncService.push(type, key, value) } catch (_: Throwable) {}
         try {
             val i = Intent(ACTION_UPDATE)
                 .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)

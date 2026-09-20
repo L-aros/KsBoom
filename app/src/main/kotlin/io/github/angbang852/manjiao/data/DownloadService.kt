@@ -24,15 +24,19 @@ import kotlin.concurrent.thread
 
 object DownloadService {
     private const val CH = "slowkick_dl"
-    private var seq = 100
     // ★ 并发去重：快速双击会触发两次同名下载，互踩 tmp/输出导致文件损坏
     private val active = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+    // ★ 通知 id 原子递增：图集/视频/音频并发触发时 seq++ 非原子会撞 id
+    private val seq = java.util.concurrent.atomic.AtomicInteger(100)
+    private const val MAX_IMG_BYTES = 30L * 1024 * 1024
 
     fun downloadVideo(ctx: Context, info: VideoInfo, dir: String) {
         val candidates = mutableListOf<String>()
         info.bestRepUrl()?.let { candidates.add(it); Logger.d("DL use bestRep: $it") }
         info.url?.let { if (it !in candidates) candidates.add(it) }
         info.domainUrl?.let { if (it !in candidates) candidates.add(it) }
+        // ★ always 级（排障）：下载是低频用户操作，整条链路必须不受日志静默影响
+        Logger.always("DLREQ video dir=$dir urls=${candidates.size} url=${info.url?.take(50)} rep=${info.repUrls.size} img=${info.imageUrls.size}")
         download(ctx, candidates, info.videoFileName(), dir, info, false)
     }
 
@@ -40,23 +44,26 @@ object DownloadService {
         val candidates = mutableListOf<String>()
         (info.audioUrl ?: info.url)?.let { candidates.add(it) }
         info.domainUrl?.let { if (it !in candidates) candidates.add(it) }
+        Logger.always("DLREQ audio dir=$dir urls=${candidates.size} audioUrl=${info.audioUrl?.take(50)}")
         download(ctx, candidates, info.audioFileName(), dir, info, true)
     }
 
     fun downloadImages(ctx: Context, info: VideoInfo, dir: String) {
         val urls = info.imageUrls
+        Logger.always("DLREQ images dir=$dir urls=${urls.size}")
         if (urls.isEmpty()) { toast(ctx, "未捕获到图集图片"); return }
         val base = info.baseName()
         val guardKey = File(dir, base).absolutePath
         if (!active.add(guardKey)) { toast(ctx, "该图集已在下载中"); return }
         toast(ctx, "开始下载图集: $base (${urls.size}张)")
-        val nid = seq++
+        val nid = seq.incrementAndGet()
         notify(ctx, nid, "准备下载图集: $base", -1)
-        thread {
+        thread(name = "MJ-DL-IMG", isDaemon = true) {
             try {
                 val outDir = File(dir, base)
                 outDir.mkdirs()
                 var done = 0
+                var failed = 0
                 for ((idx, url) in urls.withIndex()) {
                     val name = "${base}_${idx + 1}.jpg"
                     val conn = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -66,18 +73,22 @@ object DownloadService {
                     }
                     try {
                         conn.connect()
-                        if (conn.responseCode != 200) { Logger.d("DL img fail HTTP ${conn.responseCode}"); continue }
+                        if (conn.responseCode != 200) { failed++; Logger.d("DL img fail HTTP ${conn.responseCode}"); continue }
+                        // ★ 大响应预检：readBytes() 无上限，异常大响应会 OOM（下载线程崩死）
+                        val len = conn.contentLengthLong
+                        if (len > MAX_IMG_BYTES) { failed++; Logger.d("DL img[$idx] too large: $len"); continue }
                         val bytes = conn.inputStream.use { it.readBytes() }
-                        if (saveImg(bytes, File(outDir, name))) done++
+                        if (saveImg(bytes, File(outDir, name))) done++ else failed++
                         notify(ctx, nid, "下载图集 ${done}/${urls.size}", done * 100 / urls.size)
-                    } catch (t: Throwable) { Logger.d("DL img[$idx] error: ${t.message}") } finally {
+                    } catch (t: Throwable) { failed++; Logger.d("DL img[$idx] error: ${t.message}") } finally {
                         try { conn.disconnect() } catch (_: Throwable) {}
                     }
                 }
                 if (done == 0) { notify(ctx, nid, "图集下载失败", -2); toast(ctx, "图集下载失败"); return@thread }
                 saveMeta(dir, base, info)
-                notify(ctx, nid, "图集完成: $base ($done/${urls.size}张)", 100)
-                toast(ctx, "图集下载完成: $base ($done/${urls.size}张)")
+                val suffix = if (failed > 0) "，失败$failed 张" else ""
+                notify(ctx, nid, "图集完成: $base ($done/${urls.size}张$suffix)", 100)
+                toast(ctx, "图集下载完成: $base ($done/${urls.size}张$suffix)")
             } catch (t: Throwable) {
                 Logger.d("DL images error: ${t.message}")
                 notify(ctx, nid, "图集下载失败: ${t.message}", -2)
@@ -123,35 +134,55 @@ object DownloadService {
     }
 
     private fun download(ctx: Context, urls: List<String>, name: String, dir: String, info: VideoInfo, audio: Boolean) {
-        if (urls.isEmpty()) { toast(ctx, "无可用下载链接"); return }
-        val guardKey = File(dir, name).absolutePath
+        if (urls.isEmpty()) { Logger.always("DL ABORT no-urls (audio=$audio)"); toast(ctx, "无可用下载链接"); return }
+        // ★ 同名不静默覆盖：目标已存在时追加序号（搬运号同昵称+同前 40 字描述极常见，
+        // 旧实现 delete 后 rename，前一次下载成果无提示丢失）
+        var outName = name
+        if (File(dir, outName).exists()) {
+            val dot = name.lastIndexOf('.')
+            val stem = if (dot > 0) name.substring(0, dot) else name
+            val ext = if (dot > 0) name.substring(dot) else ""
+            var n = 1
+            while (File(dir, "$stem($n)$ext").exists() && n < 100) n++
+            outName = "$stem($n)$ext"
+        }
+        val guardKey = File(dir, outName).absolutePath
         if (!active.add(guardKey)) { toast(ctx, "该文件已在下载中"); return }
-        val nid = seq++
-        toast(ctx, "开始下载: $name")
-        notify(ctx, nid, "准备下载: $name", -1)
-        thread {
+        val nid = seq.incrementAndGet()
+        toast(ctx, "开始下载: $outName")
+        notify(ctx, nid, "准备下载: $outName", -1)
+        thread(name = "MJ-DL", isDaemon = true) {
             try {
                 File(dir).mkdirs()
-                val out = File(dir, name)
-                val tmp = File(dir, "$name.tmp")
+                var out = File(dir, outName)
+                val tmp = File(dir, "$outName.tmp")
                 var success = false
                 var lastErr: String? = null
                 for ((idx, url) in urls.withIndex()) {
                     if (success) break
-                    Logger.d("DL try[${idx + 1}/${urls.size}]: $url")
+                    Logger.always("DL try[${idx + 1}/${urls.size}]: ${url.take(90)}")
+                    // ★ 断点续传（审阅 2026-09 P2）：仅首个 URL 按已落盘 tmp 长度续传
+                    //（换 URL 语义不同须从零开始，非 append 模式打开会自动截断旧 tmp）
+                    val resumeFrom = if (idx == 0 && tmp.exists()) tmp.length() else 0L
                     val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                         connectTimeout = 15000; readTimeout = 30000
                         setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 12) kwai")
                         setRequestProperty("Referer", "https://www.kuaishou.com/")
+                        if (resumeFrom > 0) setRequestProperty("Range", "bytes=$resumeFrom-")
                     }
                     try {
                         conn.connect()
-                        if (conn.responseCode != 200) { lastErr = "HTTP ${conn.responseCode}"; Logger.d("DL fail $lastErr"); continue }
-                        val total = conn.contentLengthLong
-                        Logger.d("DL start: $url -> ${out.absolutePath} (audio=$audio, size=$total)")
+                        val code = conn.responseCode
+                        if (code != 200 && code != 206) { lastErr = "HTTP $code"; Logger.always("DL fail $lastErr"); continue }
+                        // 206=服务器支持续传，从 tmp 末尾追加；200=不支持，从头重下
+                        val appending = resumeFrom > 0 && code == 206
+                        if (resumeFrom > 0 && !appending) Logger.d("DL resume unsupported (HTTP 200), restart")
+                        val start = if (appending) resumeFrom else 0L
+                        val total = if (conn.contentLengthLong > 0) start + conn.contentLengthLong else -1L
+                        Logger.always("DL start: size=$total resume=$start audio=$audio")
                         conn.inputStream.use { input ->
-                            FileOutputStream(tmp).use { fos ->
-                                val buf = ByteArray(64 * 1024); var done = 0L; var last = 0L
+                            FileOutputStream(tmp, appending).use { fos ->
+                                val buf = ByteArray(64 * 1024); var done = start; var last = start
                                 val step = if (total > 0) total / 100 else 200 * 1024L
                                 while (true) {
                                     val n = input.read(buf); if (n <= 0) break
@@ -163,33 +194,87 @@ object DownloadService {
                         success = true
                     } catch (t: Throwable) {
                         lastErr = "${t.javaClass.simpleName}: ${t.message}"
-                        Logger.d("DL try[${idx + 1}] error: $lastErr")
+                        Logger.always("DL try[${idx + 1}] error: $lastErr")
                     } finally {
                         try { conn.disconnect() } catch (_: Throwable) {}
                     }
                 }
                 if (!success) {
-                    tmp.delete()  // ★ 失败清残留，否则 .tmp 永久堆积
+                    // ★ 失败保留 tmp 供下次续传（原直接删除=大文件 99% 失败从头再来）；
+                    // 0 字节残留清掉防堆积
+                    if (tmp.exists() && tmp.length() == 0L) tmp.delete()
+                    Logger.always("DL ALLFAIL out=$outName lastErr=$lastErr")
                     notify(ctx, nid, "失败: $lastErr", -2); toast(ctx, "下载失败: $lastErr"); return@thread
                 }
 
+                // ★ MP4 魔数校验（2026-09「播放不了」）：无签名源链常返回 403/HTML 页面，
+                // 会存成打不开的 .mp4——落盘前验 ftyp box，坏文件直接报错并清理
+                var magicOk = true
+                try {
+                    val fis = java.io.FileInputStream(tmp)
+                    val magic = ByteArray(12)
+                    val n = try { fis.read(magic) } finally { fis.close() }
+                    magicOk = n >= 12 && magic[4].toInt() == 'f'.code && magic[5].toInt() == 't'.code &&
+                        magic[6].toInt() == 'y'.code && magic[7].toInt() == 'p'.code
+                } catch (_: Throwable) {}
+                if (!magicOk) {
+                    tmp.delete()
+                    Logger.always("DL BADMAGIC out=$outName")
+                    notify(ctx, nid, "失败: 链接无效或需签名", -2)
+                    toast(ctx, "下载失败：链接失效或需签名")
+                    return@thread
+                }
+
                 if (audio && info.audioUrl == null) {
-                    val vidTmp = File(dir, "$name.vid.tmp")
+                    val vidTmp = File(dir, "$outName.vid.tmp")
                     tmp.renameTo(vidTmp)
                     extractAudio(vidTmp, out)
                     vidTmp.delete()
+                    // ★ 提取失败判定：无音轨/写样失败时 extractAudio 静默返回，旧实现仍报
+                    // 「下载完成」但落盘无文件——补输出存在性校验
+                    if (!out.exists() || out.length() == 0L) {
+                        notify(ctx, nid, "失败: 未能提取音轨", -2)
+                        toast(ctx, "音频提取失败（未找到音轨）")
+                        return@thread
+                    }
                 } else {
                     // ★ renameTo 在目标已存在时静默失败（返回 false 不抛异常），
                     // 会报「完成」但落盘的是上一次的旧文件
                     if (out.exists()) out.delete()
                     if (!tmp.renameTo(out)) { tmp.copyTo(out, overwrite = true); tmp.delete() }
                 }
-                Logger.d("DL ok: ${out.absolutePath}")
-                notify(ctx, nid, "完成: $name (${out.length() / 1024}KB)", 100)
-                toast(ctx, "下载完成: $name")
-                saveMeta(dir, name, info)
+                // ★ 真实分辨率探测（2026-09 用户要求）：MediaMetadataRetriever 不可靠时
+                // 手写 tkhd 解析兜底，保证标注生效
+                if (!audio) {
+                    val h = probeVideoHeight(out)
+                    Logger.always("DL res probe h=$h")
+                    val label = when {
+                        h >= 2000 -> "蓝光"
+                        h >= 1080 -> "超清"
+                        h >= 720 -> "高清"
+                        h >= 480 -> "标清"
+                        h > 0 -> "流畅"
+                        else -> null
+                    }
+                    if (label != null && !outName.contains("_$label")) {
+                        val dot = outName.lastIndexOf('.')
+                        val stem = if (dot > 0) outName.substring(0, dot) else outName
+                        val ext = if (dot > 0) outName.substring(dot) else ""
+                        val labeled = "${stem}_$label$ext"
+                        val labeledFile = File(dir, labeled)
+                        if (!labeledFile.exists() && out.renameTo(labeledFile)) {
+                            outName = labeled
+                            out = labeledFile
+                            Logger.always("DL relabel -> $outName (h=$h)")
+                        }
+                    }
+                }
+                Logger.always("DL ok: ${out.absolutePath}")
+                notify(ctx, nid, "完成: $outName (${out.length() / 1024}KB)", 100)
+                toast(ctx, "下载完成: $outName")
+                saveMeta(dir, outName, info)
             } catch (t: Throwable) {
-                Logger.d("DL error: ${t.javaClass.name}: ${t.message}")
+                Logger.always("DL error: ${t.javaClass.name}: ${t.message}")
                 notify(ctx, nid, "失败: ${t.message}", -2)
                 toast(ctx, "下载失败: ${t.message}")
             } finally {
@@ -200,6 +285,55 @@ object DownloadService {
 
     private fun toast(ctx: Context, msg: String) {
         try { Handler(Looper.getMainLooper()).post { Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show() } } catch (_: Throwable) {}
+    }
+
+    // ★ 视频高度探测（2026-09）：MediaMetadataRetriever 失败时手写 MP4 box 解析兜底
+    private fun probeVideoHeight(f: File): Int {
+        try {
+            val mmr = android.media.MediaMetadataRetriever()
+            mmr.setDataSource(f.absolutePath)
+            val hv = mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            mmr.release()
+            if (hv > 0) return hv
+        } catch (_: Throwable) {}
+        // 手写解析：moov→trak→tkhd 的 width/height（16.16 定点，v0 偏移 8+20+52）
+        return try {
+            java.io.RandomAccessFile(f, "r").use { raf ->
+                val buf = ByteArray(4)
+                fun walk(start: Long, depth: Int): Long {
+                    if (depth > 6) return -1L
+                    var p = start
+                    while (p + 8 <= raf.length()) {
+                        raf.seek(p)
+                        raf.readFully(buf)
+                        val sz = ((buf[0].toLong() and 0xff) shl 24) or ((buf[1].toLong() and 0xff) shl 16) or
+                            ((buf[2].toLong() and 0xff) shl 8) or (buf[3].toLong() and 0xff)
+                        raf.readFully(buf)
+                        val ts = String(buf, Charsets.ISO_8859_1)
+                        if (sz < 8 || sz > raf.length() - p) return -1L
+                        if (ts == "tkhd") {
+                            raf.seek(p + 8)
+                            val ver = raf.read()
+                            val fixed = if (ver == 1) 32 else 20
+                            raf.seek(p + 8 + fixed + 52)
+                            val w = Integer.reverseBytes(raf.readInt())
+                            val h = Integer.reverseBytes(raf.readInt())
+                            val hpx = h shr 16
+                            val wpx = w shr 16
+                            if (hpx > 0 && wpx > 0) return hpx.toLong()
+                            return -1L
+                        }
+                        if (ts == "moov" || ts == "trak" || ts == "mdia" || ts == "minf") {
+                            walk(p + 8, depth + 1).let { if (it > 0) return it }
+                        }
+                        p += sz
+                    }
+                    return -1L
+                }
+                val r = walk(0, 0)
+                if (r > 0) r.toInt() else 0
+            }
+        } catch (_: Throwable) { 0 }
     }
 
     private fun extractAudio(src: File, dst: File) {

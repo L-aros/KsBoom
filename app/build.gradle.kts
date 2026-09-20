@@ -65,6 +65,10 @@ dependencies {
     implementation(files("libs/libxposed-interface-102.0.0.jar"))
     implementation(files("libs/libxposed-service-102.0.0.jar"))
 
+    // ★ DexKit 结构发现（2026-09）：官方坐标 org.luckypray:dexkit（2.0 起 artifactId
+    // 由 DexKit 改为 dexkit），运行时按方法特征找混淆类（播放器），抗混淆/插件化
+    implementation("org.luckypray:dexkit:2.2.0")
+
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.recyclerview:recyclerview:1.3.2")

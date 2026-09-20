@@ -63,6 +63,10 @@ class GlassPanel(
 
     init {
         setWillNotDraw(false)
+        // ★ 软件层（审阅 2026-09 P2）：Paint.setShadowLayer 对 Path 的投影只在
+        // software layer 画布渲染——硬件加速下 shadowPad 预留的 14dp 空间里阴影
+        // 不可见（白预留）。面板面积小，软件层代价可接受
+        setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
         setPadding(shadowPad, shadowPad, shadowPad, shadowPad)
         // KernelSU: dropShadow(radius = 10.dp, alpha = dark ? 0.2f : 0.1f)
         shadowPaint.color = 0xFF000000.toInt()

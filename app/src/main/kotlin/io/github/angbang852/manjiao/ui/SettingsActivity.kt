@@ -34,8 +34,16 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var glass: GlassPanel
     private lateinit var panel: LinearLayout
 
+    // ★ 面板恢复器（审阅 2026-09 P1）：onResume 原先无条件 showMain——冷启动双重
+    // 构建、旋转/回前台丢子页状态。每个 showX 注册自身，onResume 重建当前页
+    // （重建时重读 Prefs，ACTION_PULL 回包前的旧值由本地持久层兜底）
+    private var panelRestorer: (() -> Unit)? = null
+
     override fun onPause() {
         super.onPause()
+        // ★ 输入落盘：EditText 只在失焦时保存，切后台/返回时主动 clearFocus
+        // 触发保存回调，防静默丢输入（审阅 2026-09 P2）
+        try { currentFocus?.clearFocus() } catch (_: Throwable) {}
         // 离开时全量推送（对齐快手进程可能错过的配置；快手收不到也无害）
         try { Prefs.broadcastAll(this) } catch (_: Throwable) {}
     }
@@ -43,15 +51,24 @@ class SettingsActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         Prefs.reload()
-        // 拉取快手侧当前配置（用户可能在快手悬浮菜单里改过，防止这里的旧值显示/回滚）
-        try {
-            sendBroadcast(android.content.Intent(Prefs.ACTION_PULL).addFlags(android.content.Intent.FLAG_INCLUDE_STOPPED_PACKAGES))
-        } catch (_: Throwable) {}
-        showMain()
+        // 拉取快手侧当前配置（用户可能在快手悬浮菜单里改过，防止这里的旧值显示/回滚）。
+        // ★ 显式 setPackage 投递两个快手包（审阅 2026-09 P3）：隐式广播可被任意
+        // 第三方注册同名 action 嗅探
+        for (pkg in arrayOf(KsClass.PKG, KsClass.PKG_NEBULA)) {
+            try {
+                sendBroadcast(
+                    android.content.Intent(Prefs.ACTION_PULL).setPackage(pkg)
+                        .addFlags(android.content.Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+                )
+            } catch (_: Throwable) {}
+        }
+        (panelRestorer ?: ::showMain).invoke()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // ★ XposedService 收编：模块 App 侧初始化（绑定目标进程 provider 拿共享配置）
+        try { io.github.angbang852.manjiao.data.SyncService.init() } catch (_: Throwable) {}
         window.setFlags(android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
         Prefs.init(this)
         Prefs.reload()
@@ -125,6 +142,7 @@ class SettingsActivity : AppCompatActivity() {
     private fun clearPanel() { panel.removeAllViews() }
 
     private fun showMain() {
+        panelRestorer = ::showMain
         clearPanel()
         val items = listOf(
             Item("📺", "沉浸式页面") { showImmersive() },
@@ -144,6 +162,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun showGesture() {
+        panelRestorer = ::showGesture
         clearPanel()
         panel.addView(header("手势功能", true))
         panel.addView(divider())
@@ -173,6 +192,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun showPlayback() {
+        panelRestorer = ::showPlayback
         clearPanel()
         panel.addView(header("播放控制", true))
         panel.addView(divider())
@@ -189,6 +209,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun showImmersive() {
+        panelRestorer = ::showImmersive
         clearPanel()
         panel.addView(header("沉浸式页面", true))
         panel.addView(divider())
@@ -202,6 +223,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun showHideCustom() {
+        panelRestorer = ::showHideCustom
         clearPanel()
         panel.addView(header("自定义隐藏", true) { showImmersive() })
         panel.addView(divider())
@@ -235,6 +257,7 @@ class SettingsActivity : AppCompatActivity() {
     private val RIGHT_ITEMS = arrayOf("关注", "喜欢", "评论", "收藏", "转发", "音乐封面")
 
     private fun showTopBarItems() {
+        panelRestorer = ::showTopBarItems
         clearPanel()
         panel.addView(header("顶栏隐藏项", true) { showHideCustom() })
         panel.addView(divider())
@@ -250,6 +273,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun showRightBtnItems() {
+        panelRestorer = ::showRightBtnItems
         clearPanel()
         panel.addView(header("右侧按钮隐藏项", true) { showHideCustom() })
         panel.addView(divider())
@@ -265,6 +289,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun showFilter() {
+        panelRestorer = ::showFilter
         clearPanel()
         panel.addView(header("内容过滤", true))
         panel.addView(divider())
@@ -305,6 +330,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun showPerf() {
+        panelRestorer = ::showPerf
         clearPanel()
         panel.addView(header("性能优化", true))
         panel.addView(divider())
@@ -340,6 +366,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun showPurify() {
+        panelRestorer = ::showPurify
         clearPanel()
         panel.addView(header("快手净化", true))
         panel.addView(divider())
@@ -550,6 +577,7 @@ class SettingsActivity : AppCompatActivity() {
     private fun appVersion(): String = try { packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0" } catch (_: Throwable) { "1.0" }
 
     private fun showAbout() {
+        panelRestorer = ::showAbout
         clearPanel()
         panel.addView(header("关于", true))
         panel.addView(divider())
@@ -575,15 +603,27 @@ class SettingsActivity : AppCompatActivity() {
         return row
     }
 
+    // ★ 自动检查 5 分钟限频（审阅 2026-09 P3）：原实现每次进入关于页都发一次
+    // GitHub API 请求
+    private var lastAutoCheckAt = 0L
+
     private fun checkUpdate(auto: Boolean) {
-        if (!auto) toast("检查更新中…")
+        if (auto) {
+            val now = System.currentTimeMillis()
+            if (now - lastAutoCheckAt < 300_000L) return
+            lastAutoCheckAt = now
+        } else toast("检查更新中…")
         Thread {
+            var conn: java.net.HttpURLConnection? = null
             try {
-                val conn = java.net.URL("https://api.github.com/repos/ManJiao-App/io.github.angbang852.manjiao/releases/latest").openConnection() as java.net.HttpURLConnection
+                conn = java.net.URL("https://api.github.com/repos/ManJiao-App/io.github.angbang852.manjiao/releases/latest").openConnection() as java.net.HttpURLConnection
                 conn.connectTimeout = 10000; conn.readTimeout = 10000
                 conn.setRequestProperty("User-Agent", "ManJiao")
+                // ★ 响应码校验：429/5xx 时 body 是错误 JSON，原实现照样解析（tag 恒 null
+                // 静默退出，无感知；限流期反复打 API 还会加重限流）
+                val code = conn.responseCode
+                if (code != 200) { runOnUiThread { if (!auto) toast("检查更新失败 (HTTP $code)") }; return@Thread }
                 val body = conn.inputStream.bufferedReader().use { it.readText() }
-                conn.disconnect()
                 // release tag 格式为 VersionCode-VersionName（LSPosed 仓库规范），取 VersionName 段比较
                 val tag = Regex("\"tag_name\"\\s*:\\s*\"([^\"]+)\"").find(body)?.groupValues?.get(1) ?: return@Thread
                 val latest = tag.substringAfterLast('-')
@@ -597,6 +637,8 @@ class SettingsActivity : AppCompatActivity() {
                 }
             } catch (t: Throwable) {
                 runOnUiThread { if (!auto) toast("检查更新失败") }
+            } finally {
+                try { conn?.disconnect() } catch (_: Throwable) {}
             }
         }.start()
     }

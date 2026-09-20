@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.IntentFilter
 
 import io.github.angbang852.manjiao.data.Prefs
+import io.github.angbang852.manjiao.data.SyncService
 import io.github.angbang852.manjiao.hook.AntiAntiHook
 import io.github.angbang852.manjiao.hook.ContentFilterHook
 import io.github.angbang852.manjiao.hook.GestureHook
@@ -39,6 +40,8 @@ class Module : XposedModule {
 
     override fun onModuleLoaded(param: XposedModuleInterface.ModuleLoadedParam) {
         Logger.init(this)
+        // ★ XposedService 收编（2026-09）：两进程统一经 Service 拿共享配置（广播兜底）
+        try { SyncService.init() } catch (_: Throwable) {}
         realProcName = param.processName
         Logger.d("onModuleLoaded process=" + param.processName)
     }
@@ -61,8 +64,12 @@ class Module : XposedModule {
                 try {
                     val ctx = chain.thisObject as Context
                     Prefs.init(ctx)
+                    // ★ XposedService 收编：共享配置变更监听 + 首次灌入（替代广播推送主路径）
+                    try { SyncService.armTargetSync() } catch (_: Throwable) {}
                     // 性能优化-日志静默：刷屏级诊断日志的字符串拼接+logcat 写入都在调用线程
                     Logger.quiet = Prefs.bool(Prefs.K_PERF_QUIET, true)
+                    // ★ 诊断日志独立开关（S2）：重反射诊断块只随 diag 开
+                    Logger.diag = Prefs.bool(Prefs.K_DIAG, false)
                     // ★ 性能优化-仅主进程注入：快手的 push_v3/messagesdk/kwv_sandboxed 等子进程
                     // 不装任何 hook、不注册 receiver、不发 query——子进程注入只会带来
                     // 启动变慢 + 内存浪费 + 广播风暴 + 主线程阻塞（ANR 根因之一）
@@ -104,6 +111,7 @@ class Module : XposedModule {
                                 // 配置变化 → 过滤判定缓存失效（下次判定走全量反射并重新缓存）
                                 if (key.startsWith("flt_") || key.startsWith("perf_")) ContentFilterHook.invalidateFilterCache()
                                 Logger.quiet = Prefs.bool(Prefs.K_PERF_QUIET, true)
+                                Logger.diag = Prefs.bool(Prefs.K_DIAG, false)
                                 Logger.d("prefs sync $type $key")
                             } catch (t: Throwable) { Logger.d("prefs recv fail: ${t.message}") }
                         }
@@ -114,7 +122,10 @@ class Module : XposedModule {
                     if (android.os.Build.VERSION.SDK_INT >= 26) {
                         ctx.registerReceiver(prefsReceiver, prefsFilter, Prefs.PERM_SYNC, null, Context.RECEIVER_EXPORTED)
                     } else {
-                        ctx.registerReceiver(prefsReceiver, prefsFilter)
+                        // ★ API 24/25 没有 flags 重载，但 (receiver, filter, permission, scheduler)
+                        // 四参重载自 API 1 就存在——原 else 分支漏传 PERM_SYNC，低版本上任何本机
+                        // app 都能伪造 ACTION_UPDATE 向快手进程注入配置（P1 安全）
+                        ctx.registerReceiver(prefsReceiver, prefsFilter, Prefs.PERM_SYNC, null)
                     }
                     Logger.d("prefs receiver registered")
                     Logger.safe("anti") { AntiAntiHook.hook(this, cl) }
@@ -128,6 +139,9 @@ class Module : XposedModule {
 
                     Logger.safe("perf") { PerfHook.hook(this, cl) }
                     Logger.safe("purify") { PurifyHook.hook(this, cl) }
+                    // ★ E1 自检摘要：各 hook 的安装成败由各自 always 级标记输出
+                    //（DLHOOK/PlaybackHook: hooked 等），此行确认主进程注入完成
+                    Logger.always("INSTALLED: anti/dl/share/imm/gold/flt/gs/pb/perf/purify")
                 } catch (t: Throwable) { Logger.d("onCreate hook: $t") }
                 null
             }

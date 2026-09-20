@@ -57,7 +57,15 @@ object PurifyHook {
                             // （delete/update）会在宿主拆箱处 NPE。query→空 Cursor、
                             // delete/update→0 行、insert→占位 Uri、call→空 Bundle
                             return@intercept when (mn) {
-                                "query" -> android.database.MatrixCursor(arrayOf("_id"), 1)
+                                "query" -> {
+                                    // ★ 空 Cursor 列名对齐宿主投影（审阅 2026-09 P1）：
+                                    // 原固定 _id 单列，宿主按自己的 projection getColumnIndex
+                                    // 得 -1 后 getString(-1) 抛 CursorIndexOutOfBoundsException
+                                    val proj = chain.args.firstOrNull { a ->
+                                        a is Array<*> && (a.isEmpty() || a[0] is String)
+                                    } as? Array<String>
+                                    android.database.MatrixCursor(proj ?: arrayOf("_id"), 1)
+                                }
                                 "delete", "update" -> 0
                                 "insert" -> android.net.Uri.EMPTY
                                 else -> android.os.Bundle.EMPTY

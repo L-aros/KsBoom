@@ -39,8 +39,21 @@ object GoldFloatHook {
                 val c = Reflect.findClass(cn, cl) ?: run { Logger.d("gold cls not found: $cn"); return@safe }
                 val m = try { c.getDeclaredMethod("onAttachedToWindow") } catch (_: Throwable) { null }
                 if (m == null) {
-                    // 没有覆写就用 onWindowVisibilityChanged 兜底
-                    Logger.d("gold cls no onAttachedToWindow: $cn")
+                    // ★ 兜底接线（审阅 2026-09 P3）：类未覆写 onAttachedToWindow 时
+                    // 原实现直接 return@safe，连下方的防御 setVisibility hook 也被跳过，
+                    // 该类完全无防护。改挂 onWindowVisibilityChanged 兜底
+                    Logger.d("gold cls no onAttachedToWindow: $cn (fallback onWindowVisibilityChanged)")
+                    val vm0 = try { c.getDeclaredMethod("onWindowVisibilityChanged", Int::class.javaPrimitiveType) } catch (_: Throwable) { null }
+                    if (vm0 != null) {
+                        try {
+                            xp.hook(vm0).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                                .setId("gold.attachfb.$cn").intercept { chain ->
+                                    chain.proceed()
+                                    try { (chain.thisObject as? View)?.let { scheduleHide(it) } } catch (_: Throwable) {}
+                                    null
+                                }
+                        } catch (_: Throwable) {}
+                    }
                     return@safe
                 }
                 xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
@@ -50,7 +63,7 @@ object GoldFloatHook {
                         try {
                             val v = chain.thisObject as? View ?: return@intercept null
                             val p = v.parent
-                            Logger.always("gold float attach: $cn parent=${p?.javaClass?.name}")
+                            Logger.d("gold float attach: $cn parent=${p?.javaClass?.name}")
                             scheduleHide(v)
                         } catch (_: Throwable) {}
                         null
@@ -67,7 +80,7 @@ object GoldFloatHook {
                                 try {
                                     val v = chain.thisObject as? View ?: return@intercept null
                                     if ((chain.args[0] as Int) == View.VISIBLE) {
-                                        Logger.always("gold float re-show: ${v.javaClass.simpleName}")
+                                        Logger.d("gold float re-show: ${v.javaClass.simpleName}")
                                         scheduleHide(v)
                                     }
                                 } catch (_: Throwable) {}
@@ -80,13 +93,26 @@ object GoldFloatHook {
     }
 
     private fun scheduleHide(v: View) {
-        // attach 时尺寸可能还是 0，分多个时机隐藏 + 兜底重试（长重试防快手延迟恢复显示）
-        hideIfOn(v)
-        v.post { hideIfOn(v) }
-        handler.postDelayed({ hideIfOn(v) }, 500)
-        handler.postDelayed({ hideIfOn(v) }, 2000)
-        handler.postDelayed({ hideIfOn(v) }, 5000)
-        handler.postDelayed({ hideIfOn(v) }, 10000)
+        // attach 时尺寸可能还是 0，需多次重试。原实现每 attach 固定挂 5 个 post
+        // 持 View ≤10s 不取消（审阅 2026-09 P3）——改为单一自续期 Runnable：
+        // 隐藏成功 / 开关关闭 / detach / 重试超限即自终止
+        val task = object : Runnable {
+            var tries = 0
+            override fun run() {
+                tries++
+                if (v.parent == null) return
+                if (tries > 20) return
+                if (!Prefs.bool(Prefs.K_IMM_GOLD, false)) return
+                if (v.visibility == View.GONE) return
+                if (v.width == 0 || v.height == 0) { v.postDelayed(this, 500); return }
+                v.visibility = View.GONE
+                Logger.d("gold float HIDDEN: ${v.javaClass.simpleName}")
+            }
+        }
+        v.post(task)
+        handler.postDelayed(task, 500)
+        handler.postDelayed(task, 2000)
+        handler.postDelayed(task, 5000)
     }
 
     private fun hideIfOn(v: View) {
@@ -95,7 +121,7 @@ object GoldFloatHook {
             if (!Prefs.bool(Prefs.K_IMM_GOLD, false)) return
             if (v.visibility == View.GONE) return
             v.visibility = View.GONE
-            Logger.always("gold float HIDDEN: ${v.javaClass.simpleName}")
+            Logger.d("gold float HIDDEN: ${v.javaClass.simpleName}")
         } catch (_: Throwable) {}
     }
 
@@ -143,10 +169,10 @@ object GoldFloatHook {
             Logger.d("gold HIDDEN strong cls=${v.javaClass.simpleName} w=$w h=$h t=${txt.take(10)}")
             return
         }
-        if (txt.isBlank() && cd.isBlank() && w in 40..240 && h in 40..320) {
-            v.visibility = View.GONE
-            Logger.d("gold HIDDEN plain cls=${v.javaClass.simpleName} w=$w h=$h")
-        }
+        // ★ 启发式 plain 分支已移除（审阅 2026-09 P2）：「无 id 无文字 40-240px 小窗
+        // 直接 GONE 且无恢复路径」误命中任意无名小 view 后永久消失、关开关也不恢复。
+        // 保留强信号分支（精确类名 / 金币文本 / id 命名），漏网的由
+        // FloatClasses 精确 hook 兜底
     }
 
     private fun collectText(v: View): String {
