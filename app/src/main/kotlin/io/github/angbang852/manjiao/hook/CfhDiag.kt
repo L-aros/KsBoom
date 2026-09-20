@@ -231,7 +231,7 @@ object CfhDiag {
                     val act = CfhState.tracked
                     val decor = act?.window?.decorView as? ViewGroup
                     if (decor != null) {
-                        ContentFilterHook.findPager(decor)
+                        CfhViewHook.findPager(decor)
                     }
                 } catch (_: Throwable) {}
             }

@@ -51,7 +51,7 @@ object CfhDecide {
                     Logger.d("live stack #${CfhState.liveDiagCount}:\n" + Thread.currentThread().stackTrace.drop(1).take(16).joinToString("\n"))
                 }
                 if (CfhState.liveDiagCount <= 3 || CfhState.liveDiagCount % 100 == 0) Logger.d("live feed hit: cls=$entCls")
-                try { ContentFilterHook.ensureLiveFeedConstructHooked(ent) } catch (_: Throwable) {}
+                try { CfhFeedHook.ensureLiveFeedConstructHooked(ent) } catch (_: Throwable) {}
                 return true
             }
             // ★ 游戏广告直播卡：AdNovelVideoMeta（"天龙八部"类"点击进入直播间"卡）类名不含 Live。
