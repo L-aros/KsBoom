@@ -251,7 +251,7 @@ object CfhCapture {
                 if (CfhState.liveDumped.add(ik)) {
                     if (CfhState.liveDumpCount < 60) {
                         CfhState.liveDumpCount++
-                        Logger.d("LIVEDUMP ${CfhDiag.dumpKV(ent)}")
+                        Logger.d("LIVEDUMP ${CfhUtil.dumpKV(ent)}")
                     }
                 }
             }
@@ -270,22 +270,22 @@ object CfhCapture {
                             val ep = CfhUtil.safeNextLong(serial, "mEpisodeCount")
                             val play = CfhUtil.safeNextLong(serial, "mPlayCount")
                             val dmSize = if (dm is Map<*, *>) dm.size else if (dm is Collection<*>) dm.size else -1
-                            sb.append(" serial{dataMapSize=$dmSize;mSerialId=$sId;mDramaId=$dId;mTitle=$sTitle;ep=$ep;play=$play;vars=").append(CfhDiag.dumpKV(serial)).append("}")
+                            sb.append(" serial{dataMapSize=$dmSize;mSerialId=$sId;mDramaId=$dId;mTitle=$sTitle;ep=$ep;play=$play;vars=").append(CfhUtil.dumpKV(serial)).append("}")
                         }
                         if (column != null) {
                             val cId = CfhUtil.safeNextLong(column, "mColumnId")
                             val cTitle = Reflect.readString(column, "mColumnTitle")
-                            sb.append(" column{mColumnId=$cId;mColumnTitle=$cTitle;vars=").append(CfhDiag.dumpKV(column)).append("}")
+                            sb.append(" column{mColumnId=$cId;mColumnTitle=$cTitle;vars=").append(CfhUtil.dumpKV(column)).append("}")
                         }
                         if (adNovel != null) {
                             val nId = CfhUtil.safeNextLong(adNovel, "mNovelId")
                             val nTitle = Reflect.readString(adNovel, "mTitle")
                             val nType = CfhUtil.safeNextLong(adNovel, "mAdType")
-                            sb.append(" adNovel{mNovelId=$nId;mTitle=$nTitle;mAdType=$nType;vars=").append(CfhDiag.dumpKV(adNovel)).append("}")
+                            sb.append(" adNovel{mNovelId=$nId;mTitle=$nTitle;mAdType=$nType;vars=").append(CfhUtil.dumpKV(adNovel)).append("}")
                         }
-                        if (nativeD != null) sb.append(" nativeD=").append(CfhDiag.dumpKV(nativeD))
-                        if (ltos != null) sb.append(" ltos=").append(CfhDiag.dumpKV(ltos))
-                        if (mAd != null) sb.append(" ad=").append(CfhDiag.dumpKV(mAd))
+                        if (nativeD != null) sb.append(" nativeD=").append(CfhUtil.dumpKV(nativeD))
+                        if (ltos != null) sb.append(" ltos=").append(CfhUtil.dumpKV(ltos))
+                        if (mAd != null) sb.append(" ad=").append(CfhUtil.dumpKV(mAd))
                         Logger.d(sb.toString())
                     }
                 }

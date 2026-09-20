@@ -109,7 +109,7 @@ object CfhWash {
                                                 val rawCls0 = firstEl?.javaClass?.name ?: continue
                                                 if (rawCls0.contains("Presenter") || rawCls0.contains("Callback")) continue
                                                 @Suppress("UNCHECKED_CAST")
-                                                CfhClean.sanitizeList(v2 as MutableList<Any?>, "deep:${f1.name}.${f2.name}")
+                                                CfhPurge.sanitizeList(v2 as MutableList<Any?>, "deep:${f1.name}.${f2.name}")
                                                 continue
                                             }
                                             // ★ 回调表保护：l.c 元素是 MilanoAttachCallbackPresenter$a
@@ -548,7 +548,7 @@ object CfhWash {
                                             val bs = mut.size
                                             // 真源存储列表：允许删空（pager 渲染走 V0 快照聚合，
                                             // 存储列表删空不崩；残留 1 项由 size>1 保护留脏）
-                                            CfhClean.sanitizeList(mut, "lafind:$path${f.name}", allowEmpty = true)
+                                            CfhPurge.sanitizeList(mut, "lafind:$path${f.name}", allowEmpty = true)
                                             if (mut.size != bs) Logger.d("LAFIND sanitize $path${f.name}: removed=${bs - mut.size} left=${mut.size}")
                                         }
                                     }

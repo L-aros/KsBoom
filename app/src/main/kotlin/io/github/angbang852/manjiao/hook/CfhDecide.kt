@@ -44,7 +44,7 @@ object CfhDecide {
                 CfhState.nonVfDiagCount++
                 Logger.d("nonVF ent: $entCls")
             } else CfhState.nonVfDiagCount++
-            if (Prefs.bool(Prefs.K_FLT_LIVE, false) && !CfhClean.isStructClsName(entCls) && entCls.contains("Live", true)) {
+            if (Prefs.bool(Prefs.K_FLT_LIVE, false) && !CfhUtil.isStructClsName(entCls) && entCls.contains("Live", true)) {
                 CfhState.liveDiagCount++
                 // 抓栈是高成本操作（填栈+分配），quiet 时不做
                 if (!Logger.quiet && CfhState.liveDiagCount % 100 == 1) {
@@ -137,7 +137,7 @@ object CfhDecide {
             // 审计：全特征（含作者名/类名/mAd），换条才打，便于抓漏网广告
             val mAdAny = Reflect.readAny(ent, "mAd")
             if (sig != CfhState.lastViewSig || CfhState.lastViewQp === qp) {
-                Logger.d("VIEWDIAG like=$like cmt=$cmt user=\"$un\" ent=${ent.javaClass.simpleName} ad=${mAdAny != null} aiFields=" + CfhDiag.dumpAiFields(qp, ent, cm) + " liveSid=${liveSid != null} d1=${drama1 != null} capLen=${cap.length} cap=\"${cap.take(80)}\"")
+                Logger.d("VIEWDIAG like=$like cmt=$cmt user=\"$un\" ent=${ent.javaClass.simpleName} ad=${mAdAny != null} aiFields=" + CfhUtil.dumpAiFields(qp, ent, cm) + " liveSid=${liveSid != null} d1=${drama1 != null} capLen=${cap.length} cap=\"${cap.take(80)}\"")
             }
             Logger.d("feed diag #${CfhState.feedDiagCount} like=$like liveSid=${liveSid != null} d1=${drama1 != null} d2=${drama2 != null} d3=${drama3 != null} tubeInfo=${tubeInfo != null} tubeTag=$tubeTag longVid=$longVid pmCls=$pmCls entType=$entType entDisp=$entDisp qpType=$qpType cmType=$cmType pmType=$pmType cardStyle=$cardStyle cardPlay=$cardPlay cap=${cap.take(18)}")
             if (CfhState.entFullProbeCount < 2) { CfhState.entFullProbeCount++; Logger.always("ENTPROBE hit: quiet=${Logger.quiet} longVid=$longVid d1=${drama1 != null} tube=${tube != null}") }
@@ -216,10 +216,10 @@ object CfhDecide {
                 entScan(qp, "qp.", 0, java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Int, Boolean>()))
                 if (scanHits.isNotEmpty()) Logger.always("ENTSCAN #${CfhState.entScanDiag} cap=\"${cap.take(14)}\" hits=$scanHits")
             }
-            if (CfhState.feedDiagCount <= 5 && pm != null) Logger.d("PMDUMP #${CfhState.feedDiagCount} pm=${CfhDiag.dumpKV(pm)}")
+            if (CfhState.feedDiagCount <= 5 && pm != null) Logger.d("PMDUMP #${CfhState.feedDiagCount} pm=${CfhUtil.dumpKV(pm)}")
             if (pm != null) {
                 val dis = try { Reflect.readAny(pm, "mDisclaimergeMessageV2") } catch (_: Throwable) { null }
-                if (dis != null) Logger.d("DISDUMP #${CfhState.feedDiagCount} dis=${CfhDiag.dumpKV(dis)} content=${try { Reflect.readAny(dis, "content") } catch (_: Throwable) { null }}")
+                if (dis != null) Logger.d("DISDUMP #${CfhState.feedDiagCount} dis=${CfhUtil.dumpKV(dis)} content=${try { Reflect.readAny(dis, "content") } catch (_: Throwable) { null }}")
             }
         }
         if (CfhState.movieDiagCount < 8) {
@@ -236,17 +236,17 @@ object CfhDecide {
                 CfhState.movieDiagCount++
                 val sb = StringBuilder()
                 sb.append("cap=${cap.take(25)}")
-                if (tube != null) sb.append(" | tube").append(CfhDiag.dumpKV(tube))
-                if (serial != null) sb.append(" | serial").append(CfhDiag.dumpKV(serial))
-                if (adNovel != null) sb.append(" | adNovel").append(CfhDiag.dumpKV(adNovel))
-                if (column != null) sb.append(" | column").append(CfhDiag.dumpKV(column))
-                if (liveMeta != null) sb.append(" | liveMeta").append(CfhDiag.dumpKV(liveMeta))
+                if (tube != null) sb.append(" | tube").append(CfhUtil.dumpKV(tube))
+                if (serial != null) sb.append(" | serial").append(CfhUtil.dumpKV(serial))
+                if (adNovel != null) sb.append(" | adNovel").append(CfhUtil.dumpKV(adNovel))
+                if (column != null) sb.append(" | column").append(CfhUtil.dumpKV(column))
+                if (liveMeta != null) sb.append(" | liveMeta").append(CfhUtil.dumpKV(liveMeta))
                 if (pm != null) {
-                    val aiKeys = CfhDiag.dumpKVFilter(pm, "ai")
+                    val aiKeys = CfhUtil.dumpKVFilter(pm, "ai")
                     if (aiKeys.isNotEmpty()) sb.append(" | pmAi=").append(aiKeys)
                 }
                 val vmIdx = Reflect.readAny(ent, "mVideoModel")
-                if (vmIdx != null) sb.append(" | vm").append(CfhDiag.dumpKV(vmIdx))
+                if (vmIdx != null) sb.append(" | vm").append(CfhUtil.dumpKV(vmIdx))
                 Logger.d("deep #${CfhState.movieDiagCount}: $sb")
             }
         }
@@ -278,7 +278,7 @@ object CfhDecide {
             if (cap.contains("签到") && (cap.contains("活跃") || cap.contains("宝箱") || cap.contains("双倍") || cap.contains("极速") || cap.contains("升级") || cap.contains("开宝箱"))) { hit("ads:capTask", qp); return true }
         }
         if (Prefs.bool(Prefs.K_FLT_LIVE, false)) {
-            if (!CfhClean.isStructClsName(ent.javaClass.name) && ent.javaClass.name.contains("Live", true)) { hit("live:entCls", qp); return true }
+            if (!CfhUtil.isStructClsName(ent.javaClass.name) && ent.javaClass.name.contains("Live", true)) { hit("live:entCls", qp); return true }
             val lm = Reflect.readAny(ent, "mLivePlaybackMeta")
             if (lm != null && Reflect.readAny(lm, "mLiveStreamId") != null) { hit("live:meta", qp); return true }
             if (pm != null && Reflect.readBool(pm, "mCurrentLivingState") == true) { hit("live:state", qp); return true }
@@ -364,7 +364,7 @@ object CfhDecide {
         val ent = Reflect.readAny(qp, "mEntity") ?: qp
         val entCls = ent.javaClass.name
         if (!entCls.contains("feed.VideoFeed")) {
-            if (Prefs.bool(Prefs.K_FLT_LIVE, false) && !CfhClean.isStructClsName(entCls) && entCls.contains("Live", true)) return true
+            if (Prefs.bool(Prefs.K_FLT_LIVE, false) && !CfhUtil.isStructClsName(entCls) && entCls.contains("Live", true)) return true
             return false
         }
         val cm = Reflect.readAny(ent, "mCommonMeta")
@@ -394,7 +394,7 @@ object CfhDecide {
         // ★ 直播：ent 类名含 Live 即拦（纯类名检查微秒级，与 advideo:mAd 同级）。
         // 实证 02:36 LADUMP {LiveStreamFeed=3} 批次 del 只带走 AI/广告、3 条直播全部放行
         // ——直播此前不在 quick 路径，后台补剔又晚于 pager 构造，致精选tab直播上屏
-        if (Prefs.bool(Prefs.K_FLT_LIVE, false) && !CfhClean.isStructClsName(ent.javaClass.name) && ent.javaClass.name.contains("Live", true)) {
+        if (Prefs.bool(Prefs.K_FLT_LIVE, false) && !CfhUtil.isStructClsName(ent.javaClass.name) && ent.javaClass.name.contains("Live", true)) {
             hit("live:entCls", qp); return true
         }
         if (Prefs.bool(Prefs.K_FLT_ADVIDEO, true)) {

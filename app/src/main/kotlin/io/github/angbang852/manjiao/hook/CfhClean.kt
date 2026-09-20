@@ -38,7 +38,7 @@ object CfhClean {
                         // BOOTFLUSH），靠异步删除 + 后续翻页/BOOTFLUSH 兜底
                         val dirtyId = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Any, Boolean>())
                         hits.forEach { dirtyId.add(it) }
-                        removeByIdentityOnMain(la, dirtyId, "fla", false)
+                        CfhPurge.removeByIdentityOnMain(la, dirtyId, "fla", false)
                         Logger.d("feed filtered (deferred-main) detected=${hits.size} left=${a.size}")
                     } else {
                         for (h in hits) {
@@ -63,7 +63,7 @@ object CfhClean {
                     // ★ 全脏多元素批次不再整体放行（审阅 2026-09）：旧注释声称交 sanitizeList
                     // 兜底但该路径并未调用，2 条直播同批插入会原样进宿主。现显式接
                     // sanitizeList（内部含 all-dirty refresh 兜底与后台闸门，默认保留 ≥1 项）
-                    try { sanitizeList(la, "fla-all") } catch (_: Throwable) {}
+                    try { CfhPurge.sanitizeList(la, "fla-all") } catch (_: Throwable) {}
                 }
             }
         }
@@ -103,7 +103,7 @@ object CfhClean {
             }
         } catch (_: Throwable) {}
         @Suppress("UNCHECKED_CAST")
-        sanitizeList(result as MutableList<Any?>, "ret")
+        CfhPurge.sanitizeList(result as MutableList<Any?>, "ret")
         Logger.d("feed filtered ret ${hits.size} first: ${cap0?.take(30)}")
         // ★ 真源清洗补链：ret 是 V0() 重建的快照副本，删了真源不动（实证「大青蜜桃」直播
         // 卡 ret 删 190 轮仍在屏）。快照删到脏项=真源必有对应脏对象，此处补调 filterVmLists
@@ -153,7 +153,7 @@ object CfhClean {
                     }
                     val copy = arrayListOf<Any?>()
                     copy.addAll(list)
-                    sanitizeList(copy, "field:${f.name}")
+                    CfhPurge.sanitizeList(copy, "field:${f.name}")
                     try { f.set(obj, copy) } catch (_: Throwable) {}
                 } catch (_: Throwable) {}
             }
@@ -161,86 +161,7 @@ object CfhClean {
         }
     }
 
-    fun sanitizeList(list: MutableList<Any?>, tag: String, allowEmpty: Boolean = false) {
-        // ★ 上下双视频修复（2026-09）：正在显示的那条不得删除（原地删→分页器位置
-        // 错位→当前页叠出两个视频），等它滑出视野再清
-        val visibleNow = try { CfhCapture.currentFeedPhoto() } catch (_: Throwable) { null }
-        val dirtyIdx = arrayListOf<Int>()
-        val originalSize = list.size
-        val now = System.currentTimeMillis()
-        for (i in list.indices) {
-            val it = list[i] ?: continue
-            if (it === visibleNow) continue
-            val dirty = try {
-                val q = CfhProbe.findQpInObject(it) ?: it
-                // 兼容裸实体（LiveStreamFeed/广告实体无 mEntity 包装）：按类名兜底（受对应开关控制）；
-                // ★ 宽匹配"Live"前先过结构类名黑名单（LiveConfig/LiveXxxPresenter 误删教训）
-                val rawCls = it.javaClass.name
-                CfhDecide.shouldFilterFeed(q) ||
-                    (Prefs.bool(Prefs.K_FLT_LIVE, false) && rawCls.contains("LiveStreamFeed")) ||
-                    (Prefs.bool(Prefs.K_FLT_ADS, false) && rawCls.contains("AdFeed")) ||
-                    (Prefs.bool(Prefs.K_FLT_LIVE, false) && !isStructClsName(rawCls) && rawCls.contains("Live", true))
-            } catch (_: Throwable) { false }
-            if (dirty) dirtyIdx.add(i)
-        }
-        if (dirtyIdx.isEmpty()) return
-        // ★ 后台闸门：非线程安全列表的删除投回主线程按身份执行
-        if (!CfhUtil.isBgMutationSafe(list) && Looper.myLooper() != Looper.getMainLooper()) {
-            val dirtyId = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Any, Boolean>())
-            for (i in dirtyIdx) list.getOrNull(i)?.let { dirtyId.add(it) }
-            removeByIdentityOnMain(list, dirtyId, tag, allowEmpty)
-            return
-        }
-        var removed = 0
-        for (i in dirtyIdx.sortedDescending()) {
-            // 直播位置替换成 VideoFeed 会触发 onMeasure ClassCastException，优先直接删除。
-            // allowEmpty（真源存储列表，非 pager 直接数据结构）删到 0 也不崩
-            val isLive = try { val rawCls = list[i]?.javaClass?.name ?: ""; rawCls.contains("LiveStreamFeed") || rawCls.contains("Live", true) } catch (_: Throwable) { false }
-            if (isLive && (allowEmpty || list.size > 1)) {
-                list.removeAt(i); removed++
-            } else if (allowEmpty || list.size > 1) {
-                list.removeAt(i); removed++
-            }
-        }
-        if (removed > 0) {
-            Logger.d("sanitize $tag removed/replaced $removed (left ${list.size})")
-            // ★ 不 triggerRefresh（防滑动动画被打断，同 filterListArgs）
-            // 全脏批次兜底：过滤后仍剩脏项（无干净替换可用、最后1项无法移除）→ 功能性刷新
-            // 拉新批次，直到有干净视频进来（"开屏前几个全广告"场景的唯一出路）
-            // 受「优化无更多视频」开关控制（与 prefetch 同一功能语义）
-            if (Prefs.bool(Prefs.K_FLT_NOMORE, true) && list.isNotEmpty()) {
-                val leftoverDirty = list.any { el ->
-                    el != null && try {
-                        val q = CfhProbe.findQpInObject(el) ?: el
-                        CfhDecide.shouldFilterFeed(q)
-                    } catch (_: Throwable) { false }
-                }
-                if (leftoverDirty && now - CfhState.lastAllDirtyRefreshAt > 3000) {
-                    CfhState.lastAllDirtyRefreshAt = now
-                    Logger.always("sanitize $tag all-dirty batch -> CfhSupply.triggerRefresh (left ${list.size})")
-                    CfhSupply.triggerRefresh()
-                }
-            }
-        }
-    }
 
-    fun removeByIdentityOnMain(list: MutableList<Any?>, dirtyId: MutableSet<Any>, tag: String, allowEmpty: Boolean) {
-        CfhState.handler.post {
-            try {
-                var removed = 0
-                for (i in list.indices.reversed()) {
-                    val el = list[i]
-                    if (el != null && dirtyId.contains(el) && (allowEmpty || list.size > 1)) {
-                        list.removeAt(i); removed++
-                    }
-                }
-                if (removed > 0) Logger.d("sanitize-main $tag removed $removed (left ${list.size})")
-            } catch (_: Throwable) {}
-        }
-    }
 
-    fun isStructClsName(cn: String): Boolean =
-        cn.contains("Presenter") || cn.contains("Callback") || cn.contains("Fragment") ||
-            cn.contains("Interceptor") || cn.contains("Executer") || cn.contains("Executor")
 
 }

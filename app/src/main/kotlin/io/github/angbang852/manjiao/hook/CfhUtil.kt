@@ -81,4 +81,135 @@ object CfhUtil {
         return null
     }
 
+    fun isStructClsName(cn: String): Boolean =
+        cn.contains("Presenter") || cn.contains("Callback") || cn.contains("Fragment") ||
+            cn.contains("Interceptor") || cn.contains("Executer") || cn.contains("Executor")
+    fun dumpKV(obj: Any?): String {
+        if (obj == null) return "null"
+        val sb = StringBuilder("{")
+        var c: Class<*>? = obj.javaClass
+        var lvl = 0
+        while (c != null && c != Any::class.java && lvl < 2) {
+            for (f in c!!.declaredFields) {
+                if (java.lang.reflect.Modifier.isStatic(f.modifiers)) continue
+                try {
+                    f.isAccessible = true
+                    val v = f.get(obj)
+                    if (v != null) {
+                        val vs = when (v) {
+                            is String -> "\"${v.take(20)}\""
+                            is Number, is Boolean -> "$v"
+                            is List<*> -> "List(${v.size})"
+                            else -> v.javaClass.simpleName
+                        }
+                        sb.append(f.name).append('=').append(vs).append(';')
+                    }
+                } catch (_: Throwable) {}
+            }
+            c = c.superclass; lvl++
+        }
+        sb.append('}')
+        return sb.toString()
+    }
+    fun dumpKVFilter(obj: Any?, kw: String): String {
+        if (obj == null) return ""
+        val sb = StringBuilder()
+        var c: Class<*>? = obj.javaClass
+        var lvl = 0
+        while (c != null && c != Any::class.java && lvl < 2) {
+            for (f in c!!.declaredFields) {
+                if (java.lang.reflect.Modifier.isStatic(f.modifiers)) continue
+                if (!f.name.contains(kw, true)) continue
+                try {
+                    f.isAccessible = true
+                    val v = f.get(obj)
+                    if (v != null) {
+                        val vs = when (v) {
+                            is String -> "\"${v.take(20)}\""
+                            is Number, is Boolean -> "$v"
+                            else -> v.javaClass.simpleName
+                        }
+                        sb.append(f.name).append('=').append(vs).append(';')
+                    }
+                } catch (_: Throwable) {}
+            }
+            c = c.superclass; lvl++
+        }
+        return sb.toString()
+    }
+    fun dumpAiFields(qp: Any, ent: Any, cm: Any?): String {
+        val sb = StringBuilder()
+        var n = 0
+        fun put(tag: String, fn: String, v: Any?) {
+            if (v != null && n < 22) { sb.append(",").append(tag).append(".").append(fn).append("=").append(v.toString().take(12)); n++ }
+        }
+        // 实体 + PhotoMeta + QPhoto
+        for (o in listOf(ent, cm, qp)) {
+            if (o == null) continue
+            var c: Class<*>? = o.javaClass
+            var lvl = 0
+            while (c != null && c != Any::class.java && lvl < 3) {
+                for (f in c!!.declaredFields) {
+                    val fn = f.name
+                    if ((fn.contains("ai", true) || fn.contains("aigc") || fn.contains("gen", true)) && !fn.contains("gain") && !fn.contains("again")) {
+                        try { f.isAccessible = true; put("e", fn, f.get(o)) } catch (_: Throwable) {}
+                    }
+                }
+                c = c.superclass; lvl++
+            }
+        }
+        // mVideoModel
+        val vm = try { Reflect.readAny(ent, "mVideoModel") } catch (_: Throwable) { null }
+        if (vm != null) {
+            var c: Class<*>? = vm.javaClass
+            var lvl = 0
+            while (c != null && c != Any::class.java && lvl < 3) {
+                for (f in c!!.declaredFields) {
+                    if ((f.name.contains("ai", true) || f.name.contains("aigc") || f.name.contains("gen", true)) && !f.name.contains("gain")) {
+                        try { f.isAccessible = true; put("vm", f.name, f.get(vm)) } catch (_: Throwable) {}
+                    }
+                }
+                c = c.superclass; lvl++
+            }
+        }
+        // mCoronaInfo 内部（快�?AI 生成内容标识体系�?
+        val cor = try { Reflect.readAny(ent, "mCoronaInfo") } catch (_: Throwable) { null }
+        if (cor != null) {
+            var c: Class<*>? = cor.javaClass
+            var lvl = 0
+            while (c != null && c != Any::class.java && lvl < 3) {
+                for (f in c!!.declaredFields) {
+                    try {
+                        f.isAccessible = true
+                        val v = f.get(cor)
+                        if (v != null) put("cor", f.name, v)
+                    } catch (_: Throwable) {}
+                }
+                c = c.superclass; lvl++
+            }
+        }
+        // ExtendableModelMap / 动�?map �?
+        for (tag in listOf("metaExtContainer", "mExtraMap", "mExtData")) {
+            val em = try { Reflect.readAny(ent, tag) } catch (_: Throwable) { null } ?: continue
+            if (em is Map<*, *>) {
+                for ((k, v) in em.entries) {
+                    val ks = k.toString()
+                    if (ks.contains("ai", true) || ks.contains("gen", true)) put("map[" + tag + "]", ks, v)
+                }
+            } else {
+                // �?Map：枚举其字段里值非空的小写�?
+                var c: Class<*>? = em.javaClass
+                var lvl = 0
+                while (c != null && c != Any::class.java && lvl < 3) {
+                    for (f in c!!.declaredFields) {
+                        if (f.name.contains("ai", true) && !f.name.contains("gain")) {
+                            try { f.isAccessible = true; put("em", f.name, f.get(em)) } catch (_: Throwable) {}
+                        }
+                    }
+                    c = c.superclass; lvl++
+                }
+            }
+        }
+        return if (sb.isEmpty()) "none" else sb.toString().removePrefix(",")
+    }
 }
