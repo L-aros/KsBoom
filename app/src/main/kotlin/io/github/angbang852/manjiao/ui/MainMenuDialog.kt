@@ -30,6 +30,7 @@ import io.github.angbang852.manjiao.KsClass
 import io.github.angbang852.manjiao.data.CurrentVideo
 import io.github.angbang852.manjiao.data.DownloadService
 import io.github.angbang852.manjiao.data.Prefs
+import io.github.angbang852.manjiao.hook.CfhCapture
 import io.github.angbang852.manjiao.hook.ContentFilterHook
 import io.github.angbang852.manjiao.hook.VideoDownloaderHook
 import io.github.angbang852.manjiao.util.Logger
@@ -109,7 +110,7 @@ object MainMenuDialog {
     }
 
     private fun showDownload(ctx: Context) {
-        val entries = try { ContentFilterHook.visibleEntries() } catch (_: Throwable) { emptyList<ContentFilterHook.VisEntry>() }
+        val entries = try { ContentFilterHook.visibleEntries() } catch (_: Throwable) { emptyList<CfhCapture.VisEntry>() }
         val items = ArrayList<Item>()
         // ★ 首选：分享链接路线（用户方案）——分享→复制链接后，链接即快手认定的
         // 「这条视频」，photoId 零歧义。解析走后台线程

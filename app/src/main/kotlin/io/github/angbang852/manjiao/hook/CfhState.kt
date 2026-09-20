@@ -72,7 +72,7 @@ object CfhState {
     java.util.Collections.newSetFromMap(java.util.Collections.synchronizedMap(java.util.WeakHashMap<Any, Boolean>()))
     @Volatile var lastVisibleFragRef: java.lang.ref.WeakReference<Any>? = null
     @Volatile var lastCaptureTrusted = false
-    val visRing = java.util.ArrayDeque<ContentFilterHook.VisEntry>()
+    val visRing = java.util.ArrayDeque<CfhCapture.VisEntry>()
     @Volatile var realFragClass: Class<*>? = null
     val fragSeqHookedClasses = mutableSetOf<String>()
     val fragSeqCount = java.util.concurrent.atomic.AtomicInteger(0)
