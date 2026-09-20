@@ -585,57 +585,7 @@ object CfhViewHook {
                     !m.returnType.isPrimitive && m.returnType != Void.TYPE && m.name.length <= 2
                 val isInst = m.parameterTypes.size == 2 && m.parameterTypes[0].name.contains("ViewGroup") &&
                     m.parameterTypes[1] == Int::class.javaPrimitiveType && !m.returnType.isPrimitive && m.returnType != Void.TYPE
-                if (hasListParam || isDMethod || isInst) {
-                    Logger.d("  hookAdpX[${qcn.simpleName}]: ${m.name}(${m.parameterTypes.joinToString(",") { it.simpleName }}) -> ${m.returnType.simpleName}")
-                    Logger.safe("hookAdpX.${m.name}") {
-                        xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adpX.${qcn.name}.${m.name}").intercept { chain ->
-                            try { CfhClean.filterListArgs(chain.args) } catch (_: Throwable) {}
-                            if (m.name == "p" && chain.args.size >= 2) {
-                                try {
-                                    val pos = chain.args[1] as Int
-                                    val adp = chain.thisObject
-                                    val data = try { Reflect.callMethod(adp, "g0", pos) as? List<*> } catch (_: Throwable) { null }
-                                    if (data != null && data.any { it != null && CfhDecide.shouldFilterFeed(it) }) {
-                                        for (delta in listOf(1, -1, 2, -2, 3, -3, 4, -4)) {
-                                            val np = pos + delta
-                                            val nd = try { Reflect.callMethod(adp, "g0", np) as? List<*> } catch (_: Throwable) { null }
-                                            if (nd != null && nd.isNotEmpty() && !nd.any { it != null && CfhDecide.shouldFilterFeed(it) }) {
-                                                chain.args[1] = np
-                                                if (CfhState.adpXRedirectDiag < 30) { CfhState.adpXRedirectDiag++; Logger.d("adpX p REDIRECT #$pos -> #$np") }
-                                                try { CfhSupply.triggerRefresh() } catch (_: Throwable) {}
-                                                break
-                                            }
-                                        }
-                                    }
-                                } catch (_: Throwable) {}
-                            }
-                            val r = chain.proceed()
-
-                            try {
-                                val pos = chain.args.lastOrNull() as? Int ?: -1
-                                val isPD = m.name == "p" || m.name == "D"
-                                val shouldDump = if (isPD) CfhState.adpXDump < 40 && CfhState.adpXDumped.add("pd_" + pos) else CfhState.adpXDumped.add(qcn.name + "." + m.name) && CfhState.adpXDump < 25
-                                if (shouldDump) {
-                                    CfhState.adpXDump++
-                                    Logger.d("adpX ${m.name} #$pos ret=${r?.javaClass?.name ?: "null"}")
-                                    if (r != null && isPD) {
-                                        var rc: Class<*>? = r.javaClass
-                                        var rl = 0
-                                        while (rc != null && rc != Any::class.java && rl < 3) {
-                                            for (rf in rc!!.declaredFields) {
-                                                if (java.lang.reflect.Modifier.isStatic(rf.modifiers)) continue
-                                                try { rf.isAccessible = true; val rv = rf.get(r); Logger.d("  adpXfld ${rf.name}:${rf.type.simpleName}=${rv?.javaClass?.name ?: "null"}") } catch (_: Throwable) {}
-                                            }
-                                            rc = rc.superclass; rl++
-                                        }
-                                    }
-                                }
-                            } catch (_: Throwable) {}
-
-                            r
-                        }
-                    }
-                }
+                if (hasListParam || isDMethod || isInst) installAdpX(xp, qcn, m)
             }
             qcls = qcn.superclass; qlvl++
         }
@@ -643,53 +593,10 @@ object CfhViewHook {
         var lvl = 0
         while (cls != null && cls != Any::class.java && lvl < 4) {
             for (m in cls!!.declaredMethods) {
-                if (m.returnType.name.contains("Fragment") && m.parameterTypes.isNotEmpty() && m.parameterTypes[0] == Any::class.java) {
-                    Logger.d("  hook adp create: ${m.name}(${m.parameterTypes.map { it.simpleName }.joinToString(",")}) in ${cls.name}")
-                Logger.safe("hookAdpF.${m.name}") {
-                    xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adp.F.${c.name}").intercept { chain ->
-                        try {
-                            val a0 = chain.args[0]
-                            if (a0 != null && CfhDecide.shouldFilterFeed(a0)) {
-                                Logger.d("adp F blocked: ${CfhUtil.readCaption(a0)?.take(25)}")
-                                val vm = CfhState.vmRef
-                                if (vm != null) {
-                                    var replaced = false
-                                    for (i in 0 until 15) {
-                                        val qp = try { Reflect.callMethod(vm, "T0", i) } catch (_: Throwable) { null }
-                                        if (qp != null && !CfhDecide.shouldFilterFeed(qp)) {
-                                            chain.args[0] = qp
-                                            replaced = true
-                                            Logger.d("adp F replaced -> ${CfhUtil.readCaption(qp)?.take(25)}")
-                                            break
-                                        }
-                                    }
-                                    if (!replaced) {
-                                        for (i in 0 until 15) {
-                                            val qp = try { Reflect.callMethod(vm, "U0", i) } catch (_: Throwable) { null }
-                                            if (qp != null && !CfhDecide.shouldFilterFeed(qp)) {
-                                                chain.args[0] = qp
-                                                Logger.d("adp F replaced U0 -> ${CfhUtil.readCaption(qp)?.take(25)}")
-                                                break
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (_: Throwable) {}
-                        chain.proceed()
-                    }
-                }
-            }
+                if (m.returnType.name.contains("Fragment") && m.parameterTypes.isNotEmpty() && m.parameterTypes[0] == Any::class.java) installAdpF(xp, c, m)
                 // adapter 的 set/add/addAll(List) 方法：直播从这塞进信息流，在参数阶段就剔掉
                 val hasListParam = m.parameterTypes.any { it == java.util.List::class.java || it.name.contains("List") || it.name.contains("Collection") }
-                if (hasListParam && m.declaringClass == cls) {
-                    Logger.safe("hookAdpList.${m.name}") {
-                        xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adpList.${c.name}.${m.name}").intercept { chain ->
-                            try { CfhClean.filterListArgs(chain.args) } catch (_: Throwable) {}
-                            chain.proceed()
-                        }
-                    }
-                }
+                if (hasListParam && m.declaringClass == cls) installAdpList(xp, c, m)
                 if (m.parameterTypes.size <= 3 && m.declaringClass == cls) {
                     val p1 = m.parameterTypes.firstOrNull()
                     val isIntP = p1 == Int::class.javaPrimitiveType
@@ -702,118 +609,227 @@ object CfhViewHook {
                         (m.parameterTypes.size == 2 && m.parameterTypes[0].name.contains("ViewGroup") && m.parameterTypes[1] == Int::class.javaPrimitiveType && (retFrag || nonPrimRet)) ||
                         (retFrag && m.parameterTypes.size <= 2) ||
                         (retList && m.parameterTypes.size <= 2 && isIntP)
-                    if (isSupply) {
-                        Logger.safe("hookAdpGet.${m.name}") {
-                            xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adpGet.${c.name}.${m.name}").intercept { chain ->
-                                if (CfhState.adpRef == null) CfhState.adpRef = chain.thisObject
-                                val result = chain.proceed()
-                                try {
-                                    if (result != null && !CfhState.adpGetSwapIn) {
-                                        val qp = CfhProbe.findQpInObject(result)
-                                        if (qp != null) CfhCapture.captureFeedItem(qp)
-                                        // ★ 位置↔条目权威映射（下载捕获 2026-09）：D(pos) 返回什么，
-                                        // 适配器自己最清楚——记录 pos→QPhoto，下载时用 ViewPager 的
-                                        // mCurrentItem 查表（迭代 6 版的可见性推断全部淘汰）
-                                        try {
-                                            val dpos = (chain.args.getOrNull(0) as? Int) ?: -1
-                                            if (dpos >= 0) {
-                                                val store = qp ?: CfhCapture.scanFragmentPhoto(result)
-                                                if (store != null) synchronized(CfhState.posPhotoMap) {
-                                                    CfhState.posPhotoMap.remove(dpos)
-                                                    CfhState.posPhotoMap[dpos] = java.lang.ref.WeakReference(store)
-                                                    while (CfhState.posPhotoMap.size > 16) {
-                                                        val first = CfhState.posPhotoMap.keys.firstOrNull() ?: break
-                                                        CfhState.posPhotoMap.remove(first)
-                                                    }
-                                                }
-                                            }
-                                        } catch (_: Throwable) {}
-                                        val pos = (chain.args.getOrNull(0) as? Int) ?: -1
-                                        var clsQp = qp
-                                        // 空壳实例兜底：用同位�?vm 窗口的富 qp 分类（显示源=qm 有完整数据）
-                                        if (clsQp == null || CfhUtil.readUserName(clsQp, Reflect.readAny(clsQp, "mEntity") ?: clsQp).isEmpty()) {
-                                            clsQp = CfhCapture.findWindowQp(pos) ?: clsQp
-                                        }
-                                        // ★ QPhoto 提不到时用 holder 的 Fragment 类型判定（g3c.a 的 b 字段即页面 Fragment）：
-                                        // 直播 holder 的 Fragment 类名含 Live
-                                        val holderLive = CfhProbe.findFragInHolder(result)?.javaClass?.name?.let { fn -> fn.contains("Live") || fn.contains("Ad") } == true
-                                        // ★★ 再 BFS 全图找任何 Live/Ad 实体（直播卡可能渲染在 NasaPhotoDetailFragment 里，
-                                        // Fragment 类名不含 Live，QPhoto 也提不到，只能全图找实体类名）
-                                        val holderDirtyEnt = if (!holderLive) CfhProbe.findDirtyEntityInHolder(result) else null
-                                        // ★★★ 换页机制整体拆除（真机三次实证 01:18/22:34 闪退）：KMP groot
-                                        // 框架按 fragment 创建时的位置登记 KmpSlideContext/依赖字段（如
-                                        // PhotoDetailLogger），返回相邻位 fragment 顶包 = 框架状态错配，
-                                        // 无论强弱信号都会在 onCreatedView/onActivityCreated 空指针闪退。
-                                        // 脏页改为「先渲染、后台毫秒级清洗摘除」：幸存者入池 +
-                                        // fixAdapterSelfAlways + filterVmLists/laFind + fragSeq Vp 拦绑定
-                                        // 兜底——稳定性优先，代价是脏卡上屏后零点几秒内消失
-                                        if ((clsQp != null && CfhDecide.shouldFilterFeed(clsQp)) || holderLive || holderDirtyEnt != null) {
-                                            if (CfhState.adpGetLiveSkipDiag < 40) {
-                                                CfhState.adpGetLiveSkipDiag++
-                                                Logger.always("adpGet dirty #$pos defer-clean qp=${clsQp != null && CfhDecide.shouldFilterFeed(clsQp)} live=$holderLive ent=${holderDirtyEnt != null}")
-                                            }
-                                        }
-                                        // 干净项入池：D 每取一个位置，普通视频就是池子的食粮
-                                        if (qp != null && !CfhDecide.shouldFilterFeed(qp)) {
-                                            try { CfhSwap.offerClean(qp) } catch (_: Throwable) {}
-                                        }
-                                        // ===== 原诊断（节流�?=====
-                                        if (CfhState.adpGetDiag < 10) {
-                                            CfhState.adpGetDiag++
-                                            qp?.let { q0 ->
-                                                Logger.d("adpGet ${m.name}(#${chain.args[0]}) ret=${result.javaClass.name} qp hit=${CfhDecide.shouldFilterFeed(q0)} cap=${CfhUtil.readCaption(q0)?.take(20)}")
-                                            }
-                                            if (!CfhState.adpSelfDumped) {
-                                                CfhState.adpSelfDumped = true
-                                                CfhDiag.dumpAdapterSelf(chain.thisObject)
-                                            }
-                                        }
-                                        // ★★★ adapter 自持列表每次 D() 都修（去掉一次门控）：o 列表是实际显示源，
-                                        // rerank 每次换页都会往 o 里塞新的直播项，必须持续清理。
-                                        try { CfhSwap.fixAdapterSelfAlways(chain.thisObject) } catch (_: Throwable) {}
-                                    }
-                                } catch (_: Throwable) {}
-                                result
-                            }
-                        }
-                    } else if (m.parameterTypes.isEmpty() && nonPrimRet) {
-                        Logger.safe("hookAdpProv.${m.name}") {
-                            xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adpProv.${c.name}.${m.name}").intercept { chain ->
-                                val result = chain.proceed()
-                                try {
-                                    if (result != null && CfhState.adpProvDiag < 10) {
-                                        CfhState.adpProvDiag++
-                                        Logger.d("adpProv ${m.name}() ret=${result.javaClass.name}")
-                                        if (result.javaClass.name != "com.yxcorp.gifshow.entity.QPhoto") {
-                                            CfhDiag.dumpProvider(result)
-                                        }
-                                    }
-                                } catch (_: Throwable) {}
-                                result
-                            }
-                        }
-                    } else if (m.parameterTypes.size >= 1 && m.parameterTypes.any { it.name.contains("QPhoto") }) {
-                        Logger.safe("hookAdpQp.${m.name}") {
-                            xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adpQp.${c.name}.${m.name}").intercept { chain ->
-                                try {
-                                    val qp = chain.args.firstOrNull { it != null && CfhState.qpClassRef?.isAssignableFrom(it.javaClass) == true }
-                                    if (qp != null && CfhState.adpQpDiag < 15) {
-                                        CfhState.adpQpDiag++
-                                        Logger.d("adpQp ${m.name}(${qp.javaClass.simpleName}) ret=${m.returnType.simpleName} hit=${CfhDecide.shouldFilterFeed(qp)} cap=${CfhUtil.readCaption(qp)?.take(20)}")
-                                    }
-                                } catch (_: Throwable) {}
-                                chain.proceed()
-                            }
-                        }
-                    }
+                    if (isSupply) installAdpGet(xp, c, m)
+                    else if (m.parameterTypes.isEmpty() && nonPrimRet) installAdpProv(xp, c, m)
+                    else if (m.parameterTypes.size >= 1 && m.parameterTypes.any { it.name.contains("QPhoto") }) installAdpQp(xp, c, m)
                 }
             }
             cls = cls.superclass; lvl++
         }
     }
+    private fun installAdpX(xp: XposedInterface, c: Class<*>, m: java.lang.reflect.Method) {
+        Logger.d("  hookAdpX[${c.simpleName}]: ${m.name}(${m.parameterTypes.joinToString(",") { it.simpleName }}) -> ${m.returnType.simpleName}")
+        Logger.safe("hookAdpX.${m.name}") {
+            xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adpX.${c.name}.${m.name}").intercept { chain ->
+                try { CfhClean.filterListArgs(chain.args) } catch (_: Throwable) {}
+                if (m.name == "p" && chain.args.size >= 2) {
+                    try {
+                        val pos = chain.args[1] as Int
+                        val adp = chain.thisObject
+                        val data = try { Reflect.callMethod(adp, "g0", pos) as? List<*> } catch (_: Throwable) { null }
+                        if (data != null && data.any { it != null && CfhDecide.shouldFilterFeed(it) }) {
+                            for (delta in listOf(1, -1, 2, -2, 3, -3, 4, -4)) {
+                                val np = pos + delta
+                                val nd = try { Reflect.callMethod(adp, "g0", np) as? List<*> } catch (_: Throwable) { null }
+                                if (nd != null && nd.isNotEmpty() && !nd.any { it != null && CfhDecide.shouldFilterFeed(it) }) {
+                                    chain.args[1] = np
+                                    if (CfhState.adpXRedirectDiag < 30) { CfhState.adpXRedirectDiag++; Logger.d("adpX p REDIRECT #$pos -> #$np") }
+                                    try { CfhSupply.triggerRefresh() } catch (_: Throwable) {}
+                                    break
+                                }
+                            }
+                        }
+                    } catch (_: Throwable) {}
+                }
+                val r = chain.proceed()
+
+                try {
+                    val pos = chain.args.lastOrNull() as? Int ?: -1
+                    val isPD = m.name == "p" || m.name == "D"
+                    val shouldDump = if (isPD) CfhState.adpXDump < 40 && CfhState.adpXDumped.add("pd_" + pos) else CfhState.adpXDumped.add(c.name + "." + m.name) && CfhState.adpXDump < 25
+                    if (shouldDump) {
+                        CfhState.adpXDump++
+                        Logger.d("adpX ${m.name} #$pos ret=${r?.javaClass?.name ?: "null"}")
+                        if (r != null && isPD) {
+                            var rc: Class<*>? = r.javaClass
+                            var rl = 0
+                            while (rc != null && rc != Any::class.java && rl < 3) {
+                                for (rf in rc!!.declaredFields) {
+                                    if (java.lang.reflect.Modifier.isStatic(rf.modifiers)) continue
+                                    try { rf.isAccessible = true; val rv = rf.get(r); Logger.d("  adpXfld ${rf.name}:${rf.type.simpleName}=${rv?.javaClass?.name ?: "null"}") } catch (_: Throwable) {}
+                                }
+                                rc = rc.superclass; rl++
+                            }
+                        }
+                    }
+                } catch (_: Throwable) {}
+
+                r
+            }
+        }
+    }
+
+    private fun installAdpF(xp: XposedInterface, c: Class<*>, m: java.lang.reflect.Method) {
+        Logger.d("  hook adp create: ${m.name}(${m.parameterTypes.map { it.simpleName }.joinToString(",")}) in ${c.name}")
+    Logger.safe("hookAdpF.${m.name}") {
+        xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adp.F.${c.name}").intercept { chain ->
+            try {
+                val a0 = chain.args[0]
+                if (a0 != null && CfhDecide.shouldFilterFeed(a0)) {
+                    Logger.d("adp F blocked: ${CfhUtil.readCaption(a0)?.take(25)}")
+                    val vm = CfhState.vmRef
+                    if (vm != null) {
+                        var replaced = false
+                        for (i in 0 until 15) {
+                            val qp = try { Reflect.callMethod(vm, "T0", i) } catch (_: Throwable) { null }
+                            if (qp != null && !CfhDecide.shouldFilterFeed(qp)) {
+                                chain.args[0] = qp
+                                replaced = true
+                                Logger.d("adp F replaced -> ${CfhUtil.readCaption(qp)?.take(25)}")
+                                break
+                            }
+                        }
+                        if (!replaced) {
+                            for (i in 0 until 15) {
+                                val qp = try { Reflect.callMethod(vm, "U0", i) } catch (_: Throwable) { null }
+                                if (qp != null && !CfhDecide.shouldFilterFeed(qp)) {
+                                    chain.args[0] = qp
+                                    Logger.d("adp F replaced U0 -> ${CfhUtil.readCaption(qp)?.take(25)}")
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (_: Throwable) {}
+            chain.proceed()
+        }
+    }
+    }
+
+    private fun installAdpList(xp: XposedInterface, c: Class<*>, m: java.lang.reflect.Method) {
+// adapter 的 set/add/addAll(List) 方法：直播从这塞进信息流，在参数阶段就剔掉
+        Logger.safe("hookAdpList.${m.name}") {
+            xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adpList.${c.name}.${m.name}").intercept { chain ->
+                try { CfhClean.filterListArgs(chain.args) } catch (_: Throwable) {}
+                chain.proceed()
+            }
+        }
+    }
+
+    private fun installAdpGet(xp: XposedInterface, c: Class<*>, m: java.lang.reflect.Method) {
+        Logger.safe("hookAdpGet.${m.name}") {
+            xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adpGet.${c.name}.${m.name}").intercept { chain ->
+                if (CfhState.adpRef == null) CfhState.adpRef = chain.thisObject
+                val result = chain.proceed()
+                try {
+                    if (result != null && !CfhState.adpGetSwapIn) {
+                        val qp = CfhProbe.findQpInObject(result)
+                        if (qp != null) CfhCapture.captureFeedItem(qp)
+                        // ★ 位置↔条目权威映射（下载捕获 2026-09）：D(pos) 返回什么，
+                        // 适配器自己最清楚——记录 pos→QPhoto，下载时用 ViewPager 的
+                        // mCurrentItem 查表（迭代 6 版的可见性推断全部淘汰）
+                        try {
+                            val dpos = (chain.args.getOrNull(0) as? Int) ?: -1
+                            if (dpos >= 0) {
+                                val store = qp ?: CfhCapture.scanFragmentPhoto(result)
+                                if (store != null) synchronized(CfhState.posPhotoMap) {
+                                    CfhState.posPhotoMap.remove(dpos)
+                                    CfhState.posPhotoMap[dpos] = java.lang.ref.WeakReference(store)
+                                    while (CfhState.posPhotoMap.size > 16) {
+                                        val first = CfhState.posPhotoMap.keys.firstOrNull() ?: break
+                                        CfhState.posPhotoMap.remove(first)
+                                    }
+                                }
+                            }
+                        } catch (_: Throwable) {}
+                        val pos = (chain.args.getOrNull(0) as? Int) ?: -1
+                        var clsQp = qp
+                        // 空壳实例兜底：用同位�?vm 窗口的富 qp 分类（显示源=qm 有完整数据）
+                        if (clsQp == null || CfhUtil.readUserName(clsQp, Reflect.readAny(clsQp, "mEntity") ?: clsQp).isEmpty()) {
+                            clsQp = CfhCapture.findWindowQp(pos) ?: clsQp
+                        }
+                        // ★ QPhoto 提不到时用 holder 的 Fragment 类型判定（g3c.a 的 b 字段即页面 Fragment）：
+                        // 直播 holder 的 Fragment 类名含 Live
+                        val holderLive = CfhProbe.findFragInHolder(result)?.javaClass?.name?.let { fn -> fn.contains("Live") || fn.contains("Ad") } == true
+                        // ★★ 再 BFS 全图找任何 Live/Ad 实体（直播卡可能渲染在 NasaPhotoDetailFragment 里，
+                        // Fragment 类名不含 Live，QPhoto 也提不到，只能全图找实体类名）
+                        val holderDirtyEnt = if (!holderLive) CfhProbe.findDirtyEntityInHolder(result) else null
+                        // ★★★ 换页机制整体拆除（真机三次实证 01:18/22:34 闪退）：KMP groot
+                        // 框架按 fragment 创建时的位置登记 KmpSlideContext/依赖字段（如
+                        // PhotoDetailLogger），返回相邻位 fragment 顶包 = 框架状态错配，
+                        // 无论强弱信号都会在 onCreatedView/onActivityCreated 空指针闪退。
+                        // 脏页改为「先渲染、后台毫秒级清洗摘除」：幸存者入池 +
+                        // fixAdapterSelfAlways + filterVmLists/laFind + fragSeq Vp 拦绑定
+                        // 兜底——稳定性优先，代价是脏卡上屏后零点几秒内消失
+                        if ((clsQp != null && CfhDecide.shouldFilterFeed(clsQp)) || holderLive || holderDirtyEnt != null) {
+                            if (CfhState.adpGetLiveSkipDiag < 40) {
+                                CfhState.adpGetLiveSkipDiag++
+                                Logger.always("adpGet dirty #$pos defer-clean qp=${clsQp != null && CfhDecide.shouldFilterFeed(clsQp)} live=$holderLive ent=${holderDirtyEnt != null}")
+                            }
+                        }
+                        // 干净项入池：D 每取一个位置，普通视频就是池子的食粮
+                        if (qp != null && !CfhDecide.shouldFilterFeed(qp)) {
+                            try { CfhSwap.offerClean(qp) } catch (_: Throwable) {}
+                        }
+                        // ===== 原诊断（节流�?=====
+                        if (CfhState.adpGetDiag < 10) {
+                            CfhState.adpGetDiag++
+                            qp?.let { q0 ->
+                                Logger.d("adpGet ${m.name}(#${chain.args[0]}) ret=${result.javaClass.name} qp hit=${CfhDecide.shouldFilterFeed(q0)} cap=${CfhUtil.readCaption(q0)?.take(20)}")
+                            }
+                            if (!CfhState.adpSelfDumped) {
+                                CfhState.adpSelfDumped = true
+                                CfhDiag.dumpAdapterSelf(chain.thisObject)
+                            }
+                        }
+                        // ★★★ adapter 自持列表每次 D() 都修（去掉一次门控）：o 列表是实际显示源，
+                        // rerank 每次换页都会往 o 里塞新的直播项，必须持续清理。
+                        try { CfhSwap.fixAdapterSelfAlways(chain.thisObject) } catch (_: Throwable) {}
+                    }
+                } catch (_: Throwable) {}
+                result
+            }
+        }
+    }
+
+    private fun installAdpProv(xp: XposedInterface, c: Class<*>, m: java.lang.reflect.Method) {
+        Logger.safe("hookAdpProv.${m.name}") {
+            xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adpProv.${c.name}.${m.name}").intercept { chain ->
+                val result = chain.proceed()
+                try {
+                    if (result != null && CfhState.adpProvDiag < 10) {
+                        CfhState.adpProvDiag++
+                        Logger.d("adpProv ${m.name}() ret=${result.javaClass.name}")
+                        if (result.javaClass.name != "com.yxcorp.gifshow.entity.QPhoto") {
+                            CfhDiag.dumpProvider(result)
+                        }
+                    }
+                } catch (_: Throwable) {}
+                result
+            }
+        }
+    }
+
+    private fun installAdpQp(xp: XposedInterface, c: Class<*>, m: java.lang.reflect.Method) {
+        Logger.safe("hookAdpQp.${m.name}") {
+            xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adpQp.${c.name}.${m.name}").intercept { chain ->
+                try {
+                    val qp = chain.args.firstOrNull { it != null && CfhState.qpClassRef?.isAssignableFrom(it.javaClass) == true }
+                    if (qp != null && CfhState.adpQpDiag < 15) {
+                        CfhState.adpQpDiag++
+                        Logger.d("adpQp ${m.name}(${qp.javaClass.simpleName}) ret=${m.returnType.simpleName} hit=${CfhDecide.shouldFilterFeed(qp)} cap=${CfhUtil.readCaption(qp)?.take(20)}")
+                    }
+                } catch (_: Throwable) {}
+                chain.proceed()
+            }
+        }
+    }
+
     private fun isDescendantOf(v: View, root: View): Boolean {
         var x: View? = v
         while (x != null) { if (x === root) return true; x = x.parent as? View }
         return false
     }
 }
+
