@@ -16,23 +16,12 @@ import io.github.angbang852.manjiao.util.Reflect
 import io.github.libxposed.api.XposedInterface
 
 object ContentFilterHook {
-    private val handler = Handler(Looper.getMainLooper())
     private val AD_TEXTS = arrayOf("广告", "赞助", "sponsored", "推广")
     // shouldFilterMeta 用（每 10s 一次）：Regex 预编译，不随调用重建
     private val AI_META_REGEX = Regex("\\bAI\\b|AI[生成制作绘画]|:AI|AI：")
     private val DRAMA_TEXTS = arrayOf("看全集", "文娱榜", "选集", "上集", "下集", "全剧", "剧集", "正片")
     private val MOVIE_HINT = arrayOf("电影", "电视剧", "影视", "解说", "剪辑", "全集", "第", "集", "剧")
-    @Volatile private var tracked: Activity? = null
-    private var lastSkipTime = 0L
 
-    @Volatile private var xpRef: XposedInterface? = null
-    @Volatile private var clRef: ClassLoader? = null
-    @Volatile private var vmRef: Any? = null
-    @Volatile private var adpRef: Any? = null
-    private val adpRefs = java.util.Collections.synchronizedList(mutableListOf<Any>())
-    private var elemDumped = false
-    @Volatile private var qpClassRef: Class<*>? = null
-    private val hookedDsClasses = mutableSetOf<String>()
 
     // ★ 直播页上下文放行：精选 tab 的过滤/删除链路（filterListArgs/laFind/TRUEDEL/zap）
     // 对直播页（LiveSlideActivity 等 com.kuaishou.live.* 页面）是灾难——直播页与精选容器
@@ -40,23 +29,22 @@ object ContentFilterHook {
     // 直播页 pager 掏空或打成空壳 → 直播间黑屏、滑不动、底栏切换失效（实证 07:51 del=1 left=0 后卡死）。
     // 直播页在前台时：所有内容判定放行（shouldFilterFeed=false）、构造 zap 跳过。
     // 非快手主包 Activity（系统弹窗等）不改变状态，防弹窗期间误恢复过滤。
-    @Volatile private var liveTop = false
     private fun hookActivityLifecycle(xp: XposedInterface) {
         try {
             val actCls = Class.forName("android.app.Activity", false, null)
             val mOn = actCls.getDeclaredMethod("onResume")
-            xp.hook(mOn).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("liveTop.onResume").intercept { chain ->
+            xp.hook(mOn).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("CfhState.liveTop.onResume").intercept { chain ->
                 val r = chain.proceed()
                 try {
                     val act = chain.thisObject as? Activity
                     if (act != null) {
                         val cn = act.javaClass.name
                         if (cn.startsWith("com.kuaishou.live.")) {
-                            if (!liveTop) Logger.always("LIVETOP on: $cn")
-                            liveTop = true
+                            if (!CfhState.liveTop) Logger.always("LIVETOP on: $cn")
+                            CfhState.liveTop = true
                         } else if (cn.startsWith("com.smile.gifmaker") || cn.startsWith("com.yxcorp.") || cn.startsWith("com.kwai.")) {
-                            if (liveTop) Logger.always("LIVETOP off: $cn")
-                            liveTop = false
+                            if (CfhState.liveTop) Logger.always("LIVETOP off: $cn")
+                            CfhState.liveTop = false
                         }
                     }
                 } catch (_: Throwable) {}
@@ -67,8 +55,8 @@ object ContentFilterHook {
     }
 
     fun hook(xp: XposedInterface, cl: ClassLoader) {
-        xpRef = xp
-        clRef = cl
+        CfhState.xpRef = xp
+        CfhState.clRef = cl
         hookActivityLifecycle(xp)
         Logger.d("VER=rerank-v2 hook() cl=$cl")
         val targets = setOf(
@@ -145,28 +133,26 @@ object ContentFilterHook {
 
     // ★ 直播带货预览卡（RN CombinedCard）取证：hook KRN 容器 KrnFragment 生命周期，
     // 打印参数(bundleId等) + 创建调用栈，反查 feed 里谁在创建它，找到 Java 层数据源头。
-    private var krnProbeHooked = false
-    private var krnProbeRetries = 0
     private fun hookKrnProbe(xp: XposedInterface, cl: ClassLoader) {
-        if (krnProbeHooked) return
-        krnProbeHooked = true
+        if (CfhState.krnProbeHooked) return
+        CfhState.krnProbeHooked = true
         // ★ 纯探针（只打日志不改变行为）：静默模式（默认）不安装，省掉 KrnFragment
         // 5 个生命周期 hook 的常驻开销；排查 KRN 问题时把 日志静默 关掉重启即恢复
         if (Logger.quiet) return
-        val clRef = cl
+        val probeCl = cl
         val retry = object : Runnable {
             override fun run() {
                 var done = false
                 for (cn in listOf("com.kuaishou.krn.page.KrnFragment", "KrnFragment")) {
-                    val c = Reflect.findClass(cn, clRef) ?: continue
+                    val c = Reflect.findClass(cn, probeCl) ?: continue
                     var hooked = 0
                     for (mn in listOf("onViewCreated", "onCreateView", "onAttach", "setArguments", "onResume")) {
                         val m = c.declaredMethods.firstOrNull { it.name == mn } ?: continue
                         try {
                             xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("krnProbe.$cn.$mn").intercept { chain ->
                                 try {
-                                    if (krnProbeCount < 6) {
-                                        krnProbeCount++
+                                    if (CfhState.krnProbeCount < 6) {
+                                        CfhState.krnProbeCount++
                                         val args = chain.args.joinToString(",") { a ->
                                             when (a) {
                                                 null -> "null"
@@ -183,7 +169,7 @@ object ContentFilterHook {
                                                 else -> "${a.javaClass.simpleName}"
                                             }
                                         }
-                                        Logger.always("KRNPROBE $mn #$krnProbeCount args=[$args]\n" +
+                                        Logger.always("KRNPROBE $mn #${CfhState.krnProbeCount} args=[$args]\n" +
                                             Thread.currentThread().stackTrace.drop(1).take(22).joinToString("\n"))
                                     }
                                 } catch (_: Throwable) {}
@@ -197,40 +183,36 @@ object ContentFilterHook {
                     Logger.always("krnProbe hooked $cn methods=$hooked")
                     if (hooked > 0) { done = true; break }
                 }
-                if (!done && krnProbeRetries < 40) {
-                    krnProbeRetries++
-                    if (krnProbeRetries == 1 || krnProbeRetries % 10 == 0) Logger.always("krnProbe retry #$krnProbeRetries: KrnFragment not loaded yet")
-                    handler.postDelayed(this, 2000)
+                if (!done && CfhState.krnProbeRetries < 40) {
+                    CfhState.krnProbeRetries++
+                    if (CfhState.krnProbeRetries == 1 || CfhState.krnProbeRetries % 10 == 0) Logger.always("krnProbe retry #${CfhState.krnProbeRetries}: KrnFragment not loaded yet")
+                    CfhState.handler.postDelayed(this, 2000)
                 } else if (!done) {
-                    Logger.always("krnProbe GIVE UP after $krnProbeRetries retries: KrnFragment never loaded")
+                    Logger.always("krnProbe GIVE UP after ${CfhState.krnProbeRetries} retries: KrnFragment never loaded")
                 }
             }
         }
-        handler.postDelayed(retry, 2000)
+        CfhState.handler.postDelayed(retry, 2000)
     }
-    private var krnProbeCount = 0
 
     // ★ KRN 电商/直播带货卡渲染源头拦截（模拟器已验证判定锚点）：
     // KrnReactContainerView.getLaunchModel 返回的 LaunchModel.f Bundle 含
     // bundleId=Kwaishop*（实证 KwaishopRNCPrecisionMarketing/KwaishopCLivePreviewCommodityCard
     // 同族）。命中直播带货 bundle 时清空该 Bundle 键——卡片拿不到数据即不渲染
     // （删除式拦截，非替换）。KRNLM 日志保留限次审计。
-    private var krnRcvHooked = false
-    private var krnRcvRetries = 0
-    private var krnLmDiag = 0
 
     private fun hookKrnReactContainerView(xp: XposedInterface, cl: ClassLoader) {
-        if (krnRcvHooked) return
-        krnRcvHooked = true
-        val clRef = cl
+        if (CfhState.krnRcvHooked) return
+        CfhState.krnRcvHooked = true
+        val probeCl = cl
         val retry = object : Runnable {
             override fun run() {
-                val c = Reflect.findClass("com.kuaishou.krn.page.KrnReactContainerView", clRef)
+                val c = Reflect.findClass("com.kuaishou.krn.page.KrnReactContainerView", probeCl)
                 if (c == null) {
-                    if (krnRcvRetries < 40) {
-                        krnRcvRetries++
-                        if (krnRcvRetries == 1 || krnRcvRetries % 10 == 0) Logger.always("krnRcv retry #$krnRcvRetries")
-                        handler.postDelayed(this, 2000)
+                    if (CfhState.krnRcvRetries < 40) {
+                        CfhState.krnRcvRetries++
+                        if (CfhState.krnRcvRetries == 1 || CfhState.krnRcvRetries % 10 == 0) Logger.always("krnRcv retry #${CfhState.krnRcvRetries}")
+                        CfhState.handler.postDelayed(this, 2000)
                     } else Logger.always("krnRcv GIVE UP")
                     return
                 }
@@ -260,11 +242,11 @@ object ContentFilterHook {
                                     if (isShop && Prefs.bool(Prefs.K_FLT_LIVE, false)) {
                                         val keys = fBundle!!.keySet().toList()
                                         for (k in keys) fBundle!!.remove(k)
-                                        Logger.always("KRNZAP #$krnLmDiag bundleId=$bid keysCleared=${keys.size}")
-                                        krnLmDiag++
-                                    } else if (krnLmDiag < 3 && bid != null) {
+                                        Logger.always("KRNZAP #${CfhState.krnLmDiag} bundleId=$bid keysCleared=${keys.size}")
+                                        CfhState.krnLmDiag++
+                                    } else if (CfhState.krnLmDiag < 3 && bid != null) {
                                         Logger.always("KRNLM pass bundleId=$bid")
-                                        krnLmDiag++
+                                        CfhState.krnLmDiag++
                                     }
                                 }
                             } catch (_: Throwable) {}
@@ -276,7 +258,7 @@ object ContentFilterHook {
                 // ★ 第二条渲染路径兜底：KrnReactRootView.setBundleId 是所有 KRN root
                 // view 注入 bundle 的统一入口（CombinedCard 平铺路径不走 getLaunchModel）。
                 // 命中 Kwaishop* 且直播开关开 → 清 ReactStyleProps 阻断渲染（删除式）。
-                val rv = Reflect.findClass("com.kuaishou.krn.widget.react.KrnReactRootView", clRef)
+                val rv = Reflect.findClass("com.kuaishou.krn.widget.react.KrnReactRootView", probeCl)
                 if (rv != null) {
                     val sb = rv.declaredMethods.firstOrNull { it.name == "setBundleId" }
                     val gp = rv.declaredMethods.firstOrNull { it.name == "getReactStyleProps" }
@@ -320,7 +302,7 @@ object ContentFilterHook {
                 }
                 // ★ 显示层拦截（终防线）：attach 时 bundleId 已注入（setBundleId
                 // 先于 attach 实证），双保险。命中 Kwaishop* → GONE。
-                val rv2 = Reflect.findClass("com.kuaishou.krn.widget.react.KrnReactRootView", clRef)
+                val rv2 = Reflect.findClass("com.kuaishou.krn.widget.react.KrnReactRootView", probeCl)
                 if (rv2 != null) {
                     val att = rv2.declaredMethods.firstOrNull { it.name == "onAttachedToWindow" }
                     val gb = rv2.declaredMethods.firstOrNull { it.name == "getBundleId" }
@@ -345,13 +327,12 @@ object ContentFilterHook {
         }
         // ★ 补接线：retry Runnable 构造后从未被调度（postDelayed 只存在于
         // hookKrnProbe），整条 KRN 拦截链路实际从未安装
-        handler.postDelayed(retry, 2000)
+        CfhState.handler.postDelayed(retry, 2000)
     }
     // 直播重排模块：com.kuaishou.live.rerank 在 VerticalViewPager 滚动时把
     // LiveStreamFeed 直接塞进首页信息流。它的类被混淆（e$b.onPageScrolled 回调 +
     // d.t / e$d.E 内部方法），但数据一定以 List / 单项实体的形式跨方法。
     // 策略：按「回调签名」hook onPageScrolled，并扫描 rerank 包的 List 返回方法过滤。
-    private val hookedRerankCls = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
 
     // ★ 去重键含 classloader 身份：快手插件化会把同名类装进第二个 loader，
     // 按类名去重会让新 Class 被误判「已 hook」而静默漏装（fragSeqHookedClasses
@@ -364,7 +345,7 @@ object ContentFilterHook {
         for (tn in tryNames) {
             val cn = "$pkg.$tn"
             val cc = try { Class.forName(cn, false, cl) } catch (_: Throwable) { null } ?: continue
-            if (!hookedRerankCls.add(CfhUtil.hookKey(cc))) continue
+            if (!CfhState.hookedRerankCls.add(CfhUtil.hookKey(cc))) continue
             hookedAny = true
             Logger.d("rerank cls: $cn methodCount=${cc.declaredMethods.size}")
             for (m in cc.declaredMethods) {
@@ -382,15 +363,15 @@ object ContentFilterHook {
                             if (r is List<*>) {
                                 val before = r.size
                                 filterResult(r)
-                                if (r.size != before && rerankListDiag < 20) {
-                                    rerankListDiag++
+                                if (r.size != before && CfhState.rerankListDiag < 20) {
+                                    CfhState.rerankListDiag++
                                     Logger.d("rerank list ${nm} filtered: $before -> ${r.size}")
                                 }
                             } else if (r != null) {
                                 val q = findQpInObject(r)
                                 if (q != null && shouldFilterFeed(q)) {
-                                    if (rerankSingleDiag < 20) {
-                                        rerankSingleDiag++
+                                    if (CfhState.rerankSingleDiag < 20) {
+                                        CfhState.rerankSingleDiag++
                                         Logger.d("rerank single ${nm}: ${CfhUtil.readCaption(q)?.take(20)}")
                                     }
                                     return@intercept null
@@ -412,7 +393,7 @@ object ContentFilterHook {
                             val r = chain.proceed()
                             try {
                                 val pos = chain.args.getOrNull(0) as? Int ?: -1
-                                if (rerankScrollDiag < 10) { rerankScrollDiag++; Logger.d("rerank selected #$pos") }
+                                if (CfhState.rerankScrollDiag < 10) { CfhState.rerankScrollDiag++; Logger.d("rerank selected #$pos") }
                                 if (!Logger.quiet) try { laFind() } catch (_: Throwable) {}
                             } catch (_: Throwable) {}
                             r
@@ -423,7 +404,7 @@ object ContentFilterHook {
                         xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("rerank.scroll.${cn}.${m.name}").intercept { chain ->
                             val r = chain.proceed()
                             try {
-                                if (rerankScrollDiag < 10) { rerankScrollDiag++; val pos = chain.args.getOrNull(0) as? Int ?: -1; Logger.d("rerank scroll #$pos") }
+                                if (CfhState.rerankScrollDiag < 10) { CfhState.rerankScrollDiag++; val pos = chain.args.getOrNull(0) as? Int ?: -1; Logger.d("rerank scroll #$pos") }
                                 if (!Logger.quiet) try { laFind() } catch (_: Throwable) {}
                             } catch (_: Throwable) {}
                             r
@@ -440,12 +421,12 @@ object ContentFilterHook {
                         xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("rerank.d.j").intercept { chain ->
                             val r = chain.proceed()
                             try {
-                                if (r == true && !liveTop) {
+                                if (r == true && !CfhState.liveTop) {
                                     val iN = chain.args.getOrNull(0) as? Int ?: -1
-                                    if (rerankJDiag < 20) { rerankJDiag++; Logger.always("RERANKJ hit iN=" + iN + " (live 2 ahead) -> force laFind") }
-                                    if (!Logger.quiet && rerankJDiag < 20) {
+                                    if (CfhState.rerankJDiag < 20) { CfhState.rerankJDiag++; Logger.always("RERANKJ hit iN=" + iN + " (live 2 ahead) -> force laFind") }
+                                    if (!Logger.quiet && CfhState.rerankJDiag < 20) {
                                         try {
-                                            val dumpAdp = adpRef ?: adpRefs.firstOrNull()
+                                            val dumpAdp = CfhState.adpRef ?: CfhState.adpRefs.firstOrNull()
                                             if (dumpAdp != null) {
                                                 var dc: Class<*>? = dumpAdp.javaClass
                                                 var dlvl = 0
@@ -489,22 +470,16 @@ object ContentFilterHook {
         if (hookedAny) Logger.d("hookLiveRerank done pkg=$pkg")
     }
 
-    private var rerankJDiag = 0
-    private var rerankScrollDiag = 0
-    private var rerankListDiag = 0
-    private var rerankSingleDiag = 0
-    private var plistSkipDiag = 0
 
 
-    private var lastAdpSelfFix = 0L
     private fun fixAdapterSelfAlways(adp: Any?) {
         if (adp == null) return
         val now = System.currentTimeMillis()
         // ★ 2000ms（真机回归「卡死」降温）：本方法对 adapter 全字段做 4 层扫描 +
         // 每元素 findQpInObject，全在 D() 调用线程（主线程分页路径）。300ms 持续扫
         // 在滑动期是显著主线程负担——持续清理语义保留，频率让位流畅度
-        if (now - lastAdpSelfFix < 2000) return
-        lastAdpSelfFix = now
+        if (now - CfhState.lastAdpSelfFix < 2000) return
+        CfhState.lastAdpSelfFix = now
         // ★ 持续清理语义（审阅 2026-09）：原 adpSelfFixVisited 门控使本方法对每个
         // adapter 实例只真正执行一次，与「每次 D() 都修」的注释意图相反——rerank
         // 后续塞进自持列表的脏项永远不会再被清。300ms 节流已足够防重入
@@ -531,7 +506,7 @@ object ContentFilterHook {
                                         val cleanQp = findCleanQp()
                                         if (cleanQp != null) {
                                             val sw = try { writeQpInto(el, cleanQp) } catch (_: Throwable) { 0 }
-                                            val sw2 = if (sw == 0 && qpClassRef?.isAssignableFrom(el.javaClass) == true) {
+                                            val sw2 = if (sw == 0 && CfhState.qpClassRef?.isAssignableFrom(el.javaClass) == true) {
                                                 try { @Suppress("UNCHECKED_CAST") (v as MutableList<Any?>)[i] = cleanQp; 1 } catch (_: Throwable) { 0 }
                                             } else sw
                                             fixed += if (sw2 > 0) 1 else 0
@@ -562,7 +537,6 @@ object ContentFilterHook {
 
     // Milano 数据�?= �?PageList（双向分页列表）。hook 其取数方法，
     // 在源头把直播/AI/广告/剧集 项替换成干净项或过滤掉�?
-    private val hookedPageLists = mutableSetOf<String>()
     private fun hookPageLists(xp: XposedInterface, cl: ClassLoader) {
         val names = arrayOf(
             "com.yxcorp.gifshow.detail.fragments.milano.commonfeedslide.network.CommonFeedSlideBidirectionalPageList",
@@ -572,7 +546,7 @@ object ContentFilterHook {
         )
         for (cn in names) {
             val cc = Reflect.findClass(cn, cl) ?: continue
-            val already = synchronized(hookedPageLists) { !hookedPageLists.add(CfhUtil.hookKey(cc)) }
+            val already = synchronized(CfhState.hookedPageLists) { !CfhState.hookedPageLists.add(CfhUtil.hookKey(cc)) }
             if (already) continue
             Logger.d("hookPageList: $cn")
             var c: Class<*>? = cc
@@ -594,7 +568,7 @@ object ContentFilterHook {
                                     if (r != null) {
                                         val q = findQpInObject(r)
                                         if (q != null && shouldFilterFeed(q)) {
-                                            if (plistSkipDiag < 30) { plistSkipDiag++; Logger.d("plist skip ${m.name} (${CfhUtil.readCaption(q)?.take(15)})") }
+                                            if (CfhState.plistSkipDiag < 30) { CfhState.plistSkipDiag++; Logger.d("plist skip ${m.name} (${CfhUtil.readCaption(q)?.take(15)})") }
                                             return@intercept null
                                         }
                                     }
@@ -612,29 +586,23 @@ object ContentFilterHook {
     // ★ 方向C：hook knh.b.T0 —— Milano adapter 数据插入入口
     // T0(int startPos, List<QPhoto> before, List<QPhoto> update, List<QPhoto> affected, UpdateType, String reason)
     // 在 List 参数里删脏项 = 直播卡数据不进 adapter = 不上屏
-    private var knhbT0Hooked = false
-    private var knhbT0Diag = 0
-    private var knhbCallDiag = 0
     // ★ 冷启动强制刷新：首批拦到脏项（脏卡可能已先上屏，拦截慢于渲染）→ 2s 后
     // 对 knh.b 数据源触发一次下拉刷新语义的 reload（重新请求第一页 replaceAll，
     // 新批次仍会走本 hook 过滤）＝把屏上的脏卡刷掉。每次进程冷启动只刷一次。
-    @Volatile private var bootFlushDone = false
-    @Volatile private var bootFlushPending = false
-    private var knhbInst: java.lang.ref.WeakReference<Any>? = null
     private fun scheduleBootFlush(src: Any?) {
-        if (bootFlushDone || bootFlushPending) return
-        bootFlushPending = true
-        if (src != null) knhbInst = java.lang.ref.WeakReference(src)
+        if (CfhState.bootFlushDone || CfhState.bootFlushPending) return
+        CfhState.bootFlushPending = true
+        if (src != null) CfhState.knhbInst = java.lang.ref.WeakReference(src)
         Logger.d("BOOTFLUSH scheduled 2s")
-        handler.postDelayed({
-            bootFlushPending = false
+        CfhState.handler.postDelayed({
+            CfhState.bootFlushPending = false
             try { doBootFlush() } catch (e: Throwable) { Logger.d("BOOTFLUSH err: ${e.message}") }
         }, 2000)
     }
     private fun doBootFlush() {
-        if (bootFlushDone) return
-        bootFlushDone = true
-        val inst = knhbInst?.get()
+        if (CfhState.bootFlushDone) return
+        CfhState.bootFlushDone = true
+        val inst = CfhState.knhbInst?.get()
         Logger.d("BOOTFLUSH run inst=${inst?.javaClass?.name ?: "null"}")
         // 路径1：数据源实例（含父类）上名字含 refresh/reload/requery 的无参 void 方法
         if (inst != null) {
@@ -692,41 +660,34 @@ object ContentFilterHook {
     // 已供给 photoId 历史（LRU 上限 500）+ QPhoto→photoId 身份缓存（每对象只反射一次）。
     // 去重只作用于实测的数据载荷路径：T0 的 args[2]（update 批次）+ E1 的 args[0]，
     // 删批次里 photoId 已在历史中的项；护栏同 filterListArgs（删后至少留 1 或原本 ≤1）。
-    private val seenPhotoIds = LinkedHashSet<String>()
-    private val photoIdCache = java.util.Collections.synchronizedMap(java.util.IdentityHashMap<Any, String?>())
     // ★ getPhotoId Method 缓存（含负缓存）：包装类无此方法时原先每元素每次抛
     // NoSuchMethodException（栈填充极贵），E1 大批次下纯烧 CPU
-    private val pidMCache = java.util.concurrent.ConcurrentHashMap<Class<*>, java.lang.reflect.Method>()
-    private val pidMNeg = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Class<*>, Boolean>())
-    private var dedupeDiag = 0
-    private var dedupeProbe = 0
     // ★ 饥饿计数原子化：hook 回调跑在任意线程，非原子 ++/清零丢计数会让
     // 「连续 4 批饥饿→清历史自愈」延迟触发（功能性计数，非诊断）
-    private val dedupeStarve = java.util.concurrent.atomic.AtomicInteger(0)
     private fun readPhotoId(qp: Any?): String? {
         if (qp == null) return null
-        if (photoIdCache.containsKey(qp)) return photoIdCache[qp]
+        if (CfhState.photoIdCache.containsKey(qp)) return CfhState.photoIdCache[qp]
         val cls = qp.javaClass
         val m: java.lang.reflect.Method? = when {
-            pidMNeg.contains(cls) -> null
-            pidMCache.containsKey(cls) -> pidMCache[cls]
+            CfhState.pidMNeg.contains(cls) -> null
+            CfhState.pidMCache.containsKey(cls) -> CfhState.pidMCache[cls]
             else -> try {
-                cls.getMethod("getPhotoId").apply { isAccessible = true }.also { pidMCache[cls] = it }
-            } catch (_: Throwable) { pidMNeg.add(cls); null }
+                cls.getMethod("getPhotoId").apply { isAccessible = true }.also { CfhState.pidMCache[cls] = it }
+            } catch (_: Throwable) { CfhState.pidMNeg.add(cls); null }
         }
         val id = try { m?.invoke(qp) as? String } catch (_: Throwable) { null }
         // ★ 上限 4000→800：IdentityHashMap 强引用 QPhoto（重对象），800 已覆盖去重
         // 窗口且内存尖峰小 5 倍（审阅 2026-09）
-        if (photoIdCache.size > 800) photoIdCache.clear()
-        photoIdCache[qp] = id
+        if (CfhState.photoIdCache.size > 800) CfhState.photoIdCache.clear()
+        CfhState.photoIdCache[qp] = id
         return id
     }
     private fun dedupeInsertBatch(batch: MutableList<Any?>?, tag: String): Int {
         if (batch == null || batch.isEmpty()) return 0
-        if (dedupeProbe < 3) {
-            dedupeProbe++
+        if (CfhState.dedupeProbe < 3) {
+            CfhState.dedupeProbe++
             val f = batch.firstOrNull()
-            Logger.d("knhb dedupe probe $tag size=${batch.size} cls=${f?.javaClass?.name} id=${readPhotoId(f)} hist=${synchronized(seenPhotoIds) { seenPhotoIds.size }}")
+            Logger.d("knhb dedupe probe $tag size=${batch.size} cls=${f?.javaClass?.name} id=${readPhotoId(f)} hist=${synchronized(CfhState.seenPhotoIds) { CfhState.seenPhotoIds.size }}")
         }
         var dup = 0
         val inBatch = HashSet<String>()
@@ -734,25 +695,25 @@ object ContentFilterHook {
         for (el in batch) {
             val id = readPhotoId(el) ?: continue
             if (id.isBlank()) continue
-            val seenBefore = synchronized(seenPhotoIds) { seenPhotoIds.contains(id) }
+            val seenBefore = synchronized(CfhState.seenPhotoIds) { CfhState.seenPhotoIds.contains(id) }
             // 历史已供给 或 本批次内重复 → 删
             if (seenBefore || !inBatch.add(id)) victims.add(el)
         }
         // 护栏：删后至少留 1（原本 >1 时），防 replaceAll 收到空列表
         if (victims.isNotEmpty() && batch.size - victims.size < 1) victims.removeAt(victims.size - 1)
         if (victims.isEmpty()) {
-            dedupeStarve.set(0)
+            CfhState.dedupeStarve.set(0)
             // 幸存项记入历史
-            synchronized(seenPhotoIds) {
+            synchronized(CfhState.seenPhotoIds) {
                 for (el in batch) {
                     val id = readPhotoId(el) ?: continue
                     if (id.isNotBlank()) {
-                        seenPhotoIds.remove(id); seenPhotoIds.add(id)
+                        CfhState.seenPhotoIds.remove(id); CfhState.seenPhotoIds.add(id)
                     }
                 }
-                if (seenPhotoIds.size > 500) {
-                    val it = seenPhotoIds.iterator()
-                    var drop = seenPhotoIds.size - 500
+                if (CfhState.seenPhotoIds.size > 500) {
+                    val it = CfhState.seenPhotoIds.iterator()
+                    var drop = CfhState.seenPhotoIds.size - 500
                     while (drop-- > 0 && it.hasNext()) { it.next(); it.remove() }
                 }
             }
@@ -764,39 +725,39 @@ object ContentFilterHook {
         // 但供给不涨。对策：连续 4 批 dedupe 删后 left<=1（供给无效）→ 清空 hist 重开一轮
         // （接受一轮重复换供给恢复，不卡死）；left>=2 正常批次计数清零。
         if (batch.size <= 1) {
-            val st = dedupeStarve.incrementAndGet()
+            val st = CfhState.dedupeStarve.incrementAndGet()
             if (st >= 4) {
-                synchronized(seenPhotoIds) { seenPhotoIds.clear() }
+                synchronized(CfhState.seenPhotoIds) { CfhState.seenPhotoIds.clear() }
                 Logger.always("dedupe starved 4 batches (hist reset) -> supply recover")
-                dedupeStarve.set(0)
+                CfhState.dedupeStarve.set(0)
             }
-        } else dedupeStarve.set(0)
-        if (dedupeDiag < 30) {
-            dedupeDiag++
-            Logger.d("knhb dedupe $tag dup=$dup left=${batch.size} starve=${dedupeStarve.get()} hist=${synchronized(seenPhotoIds) { seenPhotoIds.size }}")
+        } else CfhState.dedupeStarve.set(0)
+        if (CfhState.dedupeDiag < 30) {
+            CfhState.dedupeDiag++
+            Logger.d("knhb dedupe $tag dup=$dup left=${batch.size} starve=${CfhState.dedupeStarve.get()} hist=${synchronized(CfhState.seenPhotoIds) { CfhState.seenPhotoIds.size }}")
         }
         // 幸存项记入历史
-        synchronized(seenPhotoIds) {
+        synchronized(CfhState.seenPhotoIds) {
             for (el in batch) {
                 val id = readPhotoId(el) ?: continue
                 if (id.isNotBlank()) {
-                    seenPhotoIds.remove(id); seenPhotoIds.add(id)
+                    CfhState.seenPhotoIds.remove(id); CfhState.seenPhotoIds.add(id)
                 }
             }
-            if (seenPhotoIds.size > 500) {
-                val it = seenPhotoIds.iterator()
-                var drop = seenPhotoIds.size - 500
+            if (CfhState.seenPhotoIds.size > 500) {
+                val it = CfhState.seenPhotoIds.iterator()
+                var drop = CfhState.seenPhotoIds.size - 500
                 while (drop-- > 0 && it.hasNext()) { it.next(); it.remove() }
             }
         }
         return dup
     }
     private fun hookKnhbT0(xp: XposedInterface, cl: ClassLoader) {
-        if (knhbT0Hooked) return
+        if (CfhState.knhbT0Hooked) return
         val tryNames = listOf("knh.b", "knh\$b")
         for (cn in tryNames) {
             val cc = try { Class.forName(cn, false, cl) } catch (_: Throwable) { null } ?: continue
-            knhbT0Hooked = true
+            CfhState.knhbT0Hooked = true
             Logger.d("knhb found cls=$cn methodCount=${cc.declaredMethods.size}")
             for (m in cc.declaredMethods) {
                 val nm = m.name
@@ -807,15 +768,15 @@ object ContentFilterHook {
                 Logger.safe("knhb.$cn.$nm") {
                     xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("knhb.$cn.$nm").intercept { chain ->
                         try {
-                            if (knhbCallDiag < 40) {
-                                knhbCallDiag++
+                            if (CfhState.knhbCallDiag < 40) {
+                                CfhState.knhbCallDiag++
                                 val sizes = chain.args.map { if (it is List<*>) "L${it.size}" else it?.javaClass?.simpleName ?: "-" }.joinToString(",")
-                                Logger.d("knhb call $nm($sizes) hist=${synchronized(seenPhotoIds) { seenPhotoIds.size }}")
+                                Logger.d("knhb call $nm($sizes) hist=${synchronized(CfhState.seenPhotoIds) { CfhState.seenPhotoIds.size }}")
                             }
                             val removed = filterListArgs(chain.args)
                             if (removed > 0) {
-                                if (knhbT0Diag < 30) {
-                                    knhbT0Diag++
+                                if (CfhState.knhbT0Diag < 30) {
+                                    CfhState.knhbT0Diag++
                                     Logger.d("knhb.$nm filtered del=$removed")
                                 }
                                 scheduleBootFlush(chain.thisObject)
@@ -838,14 +799,13 @@ object ContentFilterHook {
                     }
                 }
             }
-            if (knhbT0Hooked) break
+            if (CfhState.knhbT0Hooked) break
         }
-        if (!knhbT0Hooked) Logger.d("knhb NOT FOUND (obfuscated?)")
+        if (!CfhState.knhbT0Hooked) Logger.d("knhb NOT FOUND (obfuscated?)")
     }
 
     // Milano �?feed 架构：直�?hotphoto)/AI(airecommendslide)/视频(commonfeedslide) 各是独立容器�?
     // 容器类被混淆�?a，这里探测其取数方法�?hook 过滤�?
-    private val hookedMilanoContainers = mutableSetOf<String>()
     private fun hookMilanoContainers(xp: XposedInterface, cl: ClassLoader) {
         val names = arrayOf(
             "com.yxcorp.gifshow.detail.slideplay.hotphoto.container.a",
@@ -859,7 +819,7 @@ object ContentFilterHook {
     }
 
     private fun hookMilanoContainer(xp: XposedInterface, cc: Class<*>, cn: String) {
-        synchronized(hookedMilanoContainers) { if (!hookedMilanoContainers.add(CfhUtil.hookKey(cc))) return }
+        synchronized(CfhState.hookedMilanoContainers) { if (!CfhState.hookedMilanoContainers.add(CfhUtil.hookKey(cc))) return }
         Logger.d("hookMilano: $cn")
         var c: Class<*>? = cc
         var lvl = 0
@@ -925,21 +885,19 @@ object ContentFilterHook {
 
     // 源头之王：hook LiveStreamFeed 构造函数，构造时把所有直播标识字段置空/置 false，
     // 让快手判别为非直播，根本不启动直播渲染管线。这样直播卡变成空壳，信息流自动跳过。
-    private var liveCtorDiag = 0
-    private val liveCtorHookedCls = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
     private fun ensureLiveFeedConstructHooked(ent: Any) {
-        val xp = xpRef ?: return
+        val xp = CfhState.xpRef ?: return
         val c = ent.javaClass
-        if (!liveCtorHookedCls.add(CfhUtil.hookKey(c))) return
+        if (!CfhState.liveCtorHookedCls.add(CfhUtil.hookKey(c))) return
         Logger.d("hookLiveCtor late: ${c.name} ctors=${c.declaredConstructors.size}")
         for (ctor in c.declaredConstructors) {
             Logger.safe("hookLiveCtorLate.${ctor.parameterTypes.size}") {
                 xp.hook(ctor).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("liveCtorLate.${c.name}.${ctor.parameterTypes.size}").intercept { chain ->
                     val r = chain.proceed()
                     try {
-                        if (Prefs.bool(Prefs.K_FLT_LIVE, false) && !liveTop) {
-                            if (liveCtorDiag < 1) {
-                                liveCtorDiag++
+                        if (Prefs.bool(Prefs.K_FLT_LIVE, false) && !CfhState.liveTop) {
+                            if (CfhState.liveCtorDiag < 1) {
+                                CfhState.liveCtorDiag++
                                 var dfc: Class<*>? = r.javaClass
                                 while (dfc != null && dfc != Any::class.java) {
                                     val dfcNow = dfc!!
@@ -971,7 +929,7 @@ object ContentFilterHook {
                                 }
                                 fc = fcNow.superclass
                             }
-                            if (zapped > 0 && liveCtorDiag < 40) { liveCtorDiag++; Logger.d("liveCtor zap zapped=$zapped") }
+                            if (zapped > 0 && CfhState.liveCtorDiag < 40) { CfhState.liveCtorDiag++; Logger.d("liveCtor zap zapped=$zapped") }
                         }
                     } catch (_: Throwable) {}
                     r
@@ -984,7 +942,7 @@ object ContentFilterHook {
         val c = Reflect.findClass(cn, cl) ?: return
         Logger.d("hookLiveFeedConstruct: $cn ctors=${c.declaredConstructors.size}")
         // dump 字段名（仅一次）
-        if (liveCtorDiag == 0) {
+        if (CfhState.liveCtorDiag == 0) {
             var fc: Class<*>? = c
             while (fc != null && fc != Any::class.java) {
                 for (f in fc!!.declaredFields) {
@@ -999,7 +957,7 @@ object ContentFilterHook {
                 xp.hook(ctor).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("liveCtor.${cn}.${ctor.parameterTypes.size}").intercept { chain ->
                     val r = chain.proceed()
                     try {
-                        if (Prefs.bool(Prefs.K_FLT_LIVE, false) && !liveTop) {
+                        if (Prefs.bool(Prefs.K_FLT_LIVE, false) && !CfhState.liveTop) {
                             var zapped = 0
                             var fc: Class<*>? = r.javaClass
                             while (fc != null && fc != Any::class.java) {
@@ -1021,7 +979,7 @@ object ContentFilterHook {
                                 }
                                 fc = fcNow.superclass
                             }
-                            if (zapped > 0 && liveCtorDiag < 30) { liveCtorDiag++; Logger.d("liveCtor zap zapped=$zapped") }
+                            if (zapped > 0 && CfhState.liveCtorDiag < 30) { CfhState.liveCtorDiag++; Logger.d("liveCtor zap zapped=$zapped") }
                         }
                     } catch (_: Throwable) {}
                 }
@@ -1042,13 +1000,9 @@ object ContentFilterHook {
     // 性能：CopyOnWriteArrayList 是热点类，callback 首行 identity 比对开销可忽略；
     // 定位到私有路径后应移除本插桩，改为精准 hook 合并方法
 
-    @Volatile private var laRef: Any? = null
-    @Volatile private var laWatchArmed = false
-    private val laLogN = java.util.concurrent.atomic.AtomicInteger(0)
-    private val retDelQp = java.util.Collections.synchronizedList(ArrayList<Any?>())
 
     private fun armLaWatch(list: Any) {
-        laRef = list
+        CfhState.laRef = list
         // ★ ANR 红线（审阅 2026-09）：本插桩挂在 CopyOnWriteArrayList 类本身的
         // add/addAll 系方法上——进程内所有 COW 列表的每次写入都要过 Xposed 桥。
         // 它是为定位快手私有合并路径而生的取证插桩（见下方原始注释），生产静默
@@ -1057,7 +1011,7 @@ object ContentFilterHook {
         // ★ LAIDS：VM.i（vmFields 实证 CopyOnWriteArrayList）与 l.a 双列表对照 dump +
         // V0 快照脏元素身份反查（retDelQp 记录 filterResult 删过的 QPhoto，看它藏在哪个字段）
         if (!Logger.quiet) Logger.safe("laTrace") {
-            val vm = vmRef
+            val vm = CfhState.vmRef
             if (vm != null) {
                 for (fname in arrayOf("i", "l")) {
                     try {
@@ -1073,8 +1027,8 @@ object ContentFilterHook {
                             val ent = try { Reflect.readAny(e, "mEntity") } catch (_: Throwable) { null }
                             if (ent != null) sb.append("/").append(ent.javaClass.simpleName)
                             try {
-                                synchronized(retDelQp) {
-                                    if (retDelQp.any { it === e }) sb.append("*DIRTY")
+                                synchronized(CfhState.retDelQp) {
+                                    if (CfhState.retDelQp.any { it === e }) sb.append("*DIRTY")
                                 }
                             } catch (_: Throwable) {}
                         }
@@ -1083,11 +1037,11 @@ object ContentFilterHook {
                 }
             }
         }
-        if (laWatchArmed) return
-        val xp = xpRef ?: return
+        if (CfhState.laWatchArmed) return
+        val xp = CfhState.xpRef ?: return
         synchronized(this) {
-            if (laWatchArmed) return
-            laWatchArmed = true
+            if (CfhState.laWatchArmed) return
+            CfhState.laWatchArmed = true
             Logger.safe("armLaWatch") {
                 val cow = java.util.concurrent.CopyOnWriteArrayList::class.java
                 val specs = listOf(
@@ -1101,7 +1055,7 @@ object ContentFilterHook {
                     try {
                         val m = cow.getDeclaredMethod(mn, *pt)
                         xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("lawatch.$mn").intercept { chain ->
-                            if (chain.thisObject !== laRef) return@intercept chain.proceed()
+                            if (chain.thisObject !== CfhState.laRef) return@intercept chain.proceed()
                             val arg = chain.args.firstOrNull()
                             var dirtySingle: Any? = null
                             if (isBatch && arg is MutableCollection<*>) {
@@ -1146,13 +1100,13 @@ object ContentFilterHook {
     // "Presenter" 字样守卫失效）——非 feed 对象一律不碰
     private fun laElDirty(el: Any?): Boolean {
         if (el == null) return false
-        if (liveTop) return false
+        if (CfhState.liveTop) return false
         return try {
             val rawCls = el.javaClass.name
             if (rawCls.contains("Presenter") || rawCls.contains("Callback") ||
                 rawCls.contains("Fragment") || rawCls.contains("Interceptor") ||
                 rawCls.contains("Executer") || rawCls.contains("Executor")) return false
-            val qp = qpClassRef ?: return false
+            val qp = CfhState.qpClassRef ?: return false
             val ent = try { Reflect.readAny(el, "mEntity") } catch (_: Throwable) { null }
             val isFeedObj = qp.isAssignableFrom(el.javaClass) ||
                 (ent != null && ent.javaClass.name.contains("Feed"))
@@ -1165,7 +1119,7 @@ object ContentFilterHook {
     }
 
     private fun laStack(tag: String) {
-        val n = laLogN.incrementAndGet()
+        val n = CfhState.laLogN.incrementAndGet()
         // 抓栈成本高且纯诊断：quiet（默认开）时直接跳过
         if (Logger.quiet || n > 20) return
         try {
@@ -1181,21 +1135,14 @@ object ContentFilterHook {
     }
     // ==================== LAWATCH end ====================
 
-    @Volatile private var laFindAt = 0L
     // ★ keep-latest 去重（审阅 2026-09）：已排队/执行中时新触发直接丢弃，防滚动期
     // rerank.d.j 高频绕流把全图 BFS 任务在单线程 executor 里积压
-    private val laFindPending = java.util.concurrent.atomic.AtomicBoolean(false)
-    private var truesrcCapDiag = 0
     // ★ 身份引用数组：hook 回调热路径禁用任何集合类（SetFromMap.contains 内部
     // 会触发其他被 hook 的集合方法 → 递归风暴实证），只用纯 === 数组遍历
-    private val trueListRefs = java.util.concurrent.CopyOnWriteArrayList<Any>()
-    private val trueWatchIds = java.util.concurrent.CopyOnWriteArrayList<Int>()
-    private val hookedTrueCls = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
-    private val trueListLogN = java.util.concurrent.atomic.AtomicInteger(0)
 
     private fun isTrueList(t: Any?): Boolean {
         if (t == null) return false
-        for (r in trueListRefs) if (r === t) return true
+        for (r in CfhState.trueListRefs) if (r === t) return true
         return false
     }
 
@@ -1203,16 +1150,16 @@ object ContentFilterHook {
     // 栈定位快手合并私有方法。对实际运行时类挂 add/addAll/set 系（ArrayList 走
     // add(E)/add(int,E)/addAll(Collection)/addAll(int,Collection)/set(int,E)）
     private fun armTrueWatch(list: Any) {
-        if (!trueListRefs.contains(list)) trueListRefs.add(list)
+        if (!CfhState.trueListRefs.contains(list)) CfhState.trueListRefs.add(list)
         val cls0 = list.javaClass
         // ★ ANR 红线（审阅 2026-09）：绝不能把 add/addAll/set 挂到 JDK 集合类上——
         // ArrayList.add 是全进程最热方法之一，类级 hook 等于给全 app 每次列表写装桥。
         // 真源列表只可能是快手自有运行时类，JDK 类型直接放弃（宁可漏挂不挂错）
         val cn0 = cls0.name
         if (cn0.startsWith("java.") || cn0.startsWith("android.") || cn0.startsWith("kotlin.")) return
-        val xp = xpRef ?: return
+        val xp = CfhState.xpRef ?: return
         synchronized(this) {
-            if (!hookedTrueCls.add(CfhUtil.hookKey(cls0))) return
+            if (!CfhState.hookedTrueCls.add(CfhUtil.hookKey(cls0))) return
             Logger.safe("armTrueWatch") {
                 val cls = list.javaClass
                 var ok = 0
@@ -1265,7 +1212,7 @@ object ContentFilterHook {
     }
 
     private fun trueStack(tag: String) {
-        val n = trueListLogN.incrementAndGet()
+        val n = CfhState.trueListLogN.incrementAndGet()
         if (Logger.quiet || n > 20) return
         try {
             val st = Thread.currentThread().stackTrace
@@ -1284,22 +1231,22 @@ object ContentFilterHook {
     // adapter 数据集，不在 VM 真源里，漏拦实证 2026-09-08）。
     // 后台线程跑（ANR 红线），2.5 秒节流
     private fun laFind(force: Boolean = false) {
-        if (liveTop) return
+        if (CfhState.liveTop) return
         val now = System.currentTimeMillis()
-        if (!force && now - laFindAt < 2500) return
-        laFindAt = now
-        val targets = synchronized(retDelQp) { retDelQp.toList().filterNotNull() }
+        if (!force && now - CfhState.laFindAt < 2500) return
+        CfhState.laFindAt = now
+        val targets = synchronized(CfhState.retDelQp) { CfhState.retDelQp.toList().filterNotNull() }
         // ★ force（rerank.d.j 预判前方有直播触发）时 targets 空也扫：直播卡可能未经
         // filterResult 快照（retDelQp 空），靠 laElDirty 直判 QPhoto(LiveStreamFeed) 命中
         if (targets.isEmpty() && !force) return
         val roots = mutableListOf<Pair<Any, String>>()
-        vmRef?.let { roots.add(it to "VM.") }
-        adpRef?.let { roots.add(it to "ADP.") }
-        for (ar in adpRefs.toList()) roots.add(ar to "ADP2.")
+        CfhState.vmRef?.let { roots.add(it to "VM.") }
+        CfhState.adpRef?.let { roots.add(it to "ADP.") }
+        for (ar in CfhState.adpRefs.toList()) roots.add(ar to "ADP2.")
         if (roots.isEmpty()) return
-        if (!laFindPending.compareAndSet(false, true)) return
-        cleanExecutor.execute {
-            laFindPending.set(false)
+        if (!CfhState.laFindPending.compareAndSet(false, true)) return
+        CfhState.cleanExecutor.execute {
+            CfhState.laFindPending.set(false)
             Logger.safe("laFind") {
                 val seen = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Int, Boolean>())
                 fun walk(holder: Any, path: String, depth: Int) {
@@ -1332,10 +1279,10 @@ object ContentFilterHook {
                                     // 凡 VM.* 下的脏列表一律挂 TRUEWATCH 前置删除（per-cls
                                     // 去重，同运行时类的列表共享同一组 hook，身份比对过滤）
                                     if (hitCnt > 0) {
-                                        if (path.startsWith("VM.") && trueListRefs.none { it === v } &&
-                                            trueWatchIds.add(System.identityHashCode(v))) {
-                                            if (truesrcCapDiag < 20) {
-                                                truesrcCapDiag++
+                                        if (path.startsWith("VM.") && CfhState.trueListRefs.none { it === v } &&
+                                            CfhState.trueWatchIds.add(System.identityHashCode(v))) {
+                                            if (CfhState.truesrcCapDiag < 20) {
+                                                CfhState.truesrcCapDiag++
                                                 Logger.always("TRUESRC captured: $path${f.name} id=${System.identityHashCode(v)} size=${v.size} cls=${v.javaClass.name}")
                                             }
                                             armTrueWatch(v)
@@ -1417,39 +1364,38 @@ object ContentFilterHook {
     }
 
     private fun startTrack(act: Activity) {
-        tracked = act
-        handler.removeCallbacks(checkTask)
-        handler.postDelayed(checkTask, 300)
+        CfhState.tracked = act
+        CfhState.handler.removeCallbacks(checkTask)
+        CfhState.handler.postDelayed(checkTask, 300)
     }
 
     private fun stopTrack(act: Activity) {
-        if (tracked === act) {
-            tracked = null
-            handler.removeCallbacks(checkTask)
+        if (CfhState.tracked === act) {
+            CfhState.tracked = null
+            CfhState.handler.removeCallbacks(checkTask)
         }
     }
 
     private val checkTask = object : Runnable {
         override fun run() {
-            val act = tracked ?: return
+            val act = CfhState.tracked ?: return
             check(act)
             // 1500ms：check 内部自带 5s/10s 节流，轮询本身只需兜底醒来，
             // 350ms 的空转唤醒纯属浪费（改动前每秒近 3 次主线程调度）
-            if (tracked != null) handler.postDelayed(this, 1500)
+            if (CfhState.tracked != null) CfhState.handler.postDelayed(this, 1500)
         }
     }
 
-    private var lastPagerSearch = 0L
     private fun check(act: Activity) {
         Logger.safe("findPagerInCheck") {
             // ★ pager 已定位且仍挂在窗口上：整个搜索块直接跳过（此前缓存有效时
             // 每 5 秒仍白跑一次 getIdentifier + findViewById）。仅在缓存缺失或
             // 脱离窗口时按 5 秒节流重新搜索
-            val pc = pagerCache
+            val pc = CfhState.pagerCache
             if (pc != null && (pc as? android.view.View)?.isAttachedToWindow == true) return@safe
             val now = System.currentTimeMillis()
-            if (now - lastPagerSearch > 5000) {
-                lastPagerSearch = now
+            if (now - CfhState.lastPagerSearch > 5000) {
+                CfhState.lastPagerSearch = now
                 try {
                     val id = act.resources.getIdentifier("nasa_groot_view_pager", "id", "com.smile.gifmaker")
                     if (id != 0) {
@@ -1457,7 +1403,7 @@ object ContentFilterHook {
                         if (v != null) findPager(v)
                     }
                 } catch (_: Throwable) {}
-                val pc2 = pagerCache
+                val pc2 = CfhState.pagerCache
                 if (pc2 == null || (pc2 as? android.view.View)?.isAttachedToWindow != true) {
                     val decor = act.window.decorView as? ViewGroup
                     if (decor != null) findPager(decor)
@@ -1468,8 +1414,8 @@ object ContentFilterHook {
         Logger.safe("filterMetaCheck") {
 
             val now = System.currentTimeMillis()
-            if (now - lastSkipTime < 10000) return@safe
-            lastSkipTime = now
+            if (now - CfhState.lastSkipTime < 10000) return@safe
+            CfhState.lastSkipTime = now
             val v = CurrentVideo.current
             if (v.valid() && shouldFilterMeta(v) && !Logger.quiet) Logger.d("filter meta diag: ${CfhUtil.readCaption(v)?.take(20)}")
         }
@@ -1478,8 +1424,6 @@ object ContentFilterHook {
 
     // 从 View 向上爬（含反射字段）的 findQpUpFromView 已删除：零调用死代码
     // （grep 证实），R8 release 亦会剥离
-    @Volatile private var lastViewQp: Any? = null
-    private var aiFullDumpCount = 0
 
     // ★ 下载捕获的数据层直供（2026-09 排障）：网络钩子（URL ctor/okhttp/播放器）
     // 在 API 36 ART + 插件化播放器下全部不可靠（安装 ok 但永不命中），下载菜单
@@ -1487,11 +1431,7 @@ object ContentFilterHook {
     // currentFeedPhoto 在「点下载的瞬间」现场解析：遍历活着的 slide Fragment，
     // 取此刻 localVisibleRect 非空的页读字段——500ms 被动扫描存在竞态（快速划页
     // 后立刻点下载，扫描还没跑到新页）
-    @Volatile private var visiblePhotoRef: java.lang.ref.WeakReference<Any>? = null
     // ★ pos → QPhoto/holder（D(pos) 供给映射，LRU 16）：位置↔条目的权威来源
-    private val posPhotoMap = java.util.LinkedHashMap<Int, java.lang.ref.WeakReference<Any>>()
-    private val liveSlideFragments =
-        java.util.Collections.newSetFromMap(java.util.Collections.synchronizedMap(java.util.WeakHashMap<Any, Boolean>()))
 
     // ★ Fragment 自身的 photoId（自动锁定「这条视频」2026-09）：Fragment 创建时
     // 参数里绑定的是它自己那一条（与会被预绑定为下一视频的 M 字段不同）——拿这个
@@ -1542,7 +1482,7 @@ object ContentFilterHook {
         var bestScore = -1
         var bestVia = "none"
         try {
-            val snapshot = synchronized(liveSlideFragments) { liveSlideFragments.toList() }
+            val snapshot = synchronized(CfhState.liveSlideFragments) { CfhState.liveSlideFragments.toList() }
             for (o in snapshot) {
                 val frag = o as? androidx.fragment.app.Fragment ?: continue
                 val mPhoto = scanFragmentPhoto(frag)
@@ -1569,7 +1509,7 @@ object ContentFilterHook {
                 if (ph == null) {
                     viaPos = "M"
                     ph = mPhoto
-                    if (ph == null || posPhotoMap.isNotEmpty()) {
+                    if (ph == null || CfhState.posPhotoMap.isNotEmpty()) {
                         var c: Class<*>? = frag.javaClass
                         var lvl = 0
                         loop@ while (c != null && c != Any::class.java && lvl < 4) {
@@ -1578,8 +1518,8 @@ object ContentFilterHook {
                                 try {
                                     f.isAccessible = true
                                     val iv = f.getInt(frag)
-                                    val cand = synchronized(posPhotoMap) {
-                                        posPhotoMap[iv]?.get() ?: posPhotoMap[iv + 1]?.get()
+                                    val cand = synchronized(CfhState.posPhotoMap) {
+                                        CfhState.posPhotoMap[iv]?.get() ?: CfhState.posPhotoMap[iv + 1]?.get()
                                     } ?: continue
                                     if (cand !== mPhoto) { ph = cand; viaPos = "pos$iv"; break@loop }
                                 } catch (_: Throwable) {}
@@ -1593,42 +1533,40 @@ object ContentFilterHook {
                 if (score > bestScore) { bestScore = score; best = ph; bestFrag = frag; bestVia = viaPos }
             }
         } catch (_: Throwable) {}
-        if (best == null) best = visiblePhotoRef?.get()
+        if (best == null) best = CfhState.visiblePhotoRef?.get()
         // ★ vm 信任标记：ownpid 精确匹配的照片（VM 批次原生）信任其 mVideoModel；
         // M 字段/兜底照片的 mVideoModel 可能被预填下一视频，下载时必须排除
         try {
-            lastCaptureTrusted = (bestVia == "own" && best != null)
-            best?.let { visiblePhotoRef = java.lang.ref.WeakReference(it) }
+            CfhState.lastCaptureTrusted = (bestVia == "own" && best != null)
+            best?.let { CfhState.visiblePhotoRef = java.lang.ref.WeakReference(it) }
             bestFrag?.let {
-                lastVisibleFragRef = java.lang.ref.WeakReference(it)
+                CfhState.lastVisibleFragRef = java.lang.ref.WeakReference(it)
                 ringPush(best!!, it)
             }
         } catch (_: Throwable) {}
         try {
-            val keys = synchronized(posPhotoMap) { posPhotoMap.keys.toList().takeLast(6) }
+            val keys = synchronized(CfhState.posPhotoMap) { CfhState.posPhotoMap.keys.toList().takeLast(6) }
             Logger.always("DLCAP via=$bestVia keys=$keys cap=${best?.let { CfhUtil.readCaption(it)?.take(16) }}")
         } catch (_: Throwable) {}
         return best
     }
 
     // 供下载 URL 深扫用：与 currentFeedPhoto 配对的可见 Fragment
-    @Volatile private var lastVisibleFragRef: java.lang.ref.WeakReference<Any>? = null
-    fun currentFeedFragment(): Any? = lastVisibleFragRef?.get()
+    fun currentFeedFragment(): Any? = CfhState.lastVisibleFragRef?.get()
 
-    @Volatile private var lastCaptureTrusted = false
-    fun isCaptureTrusted(): Boolean = lastCaptureTrusted
+    fun isCaptureTrusted(): Boolean = CfhState.lastCaptureTrusted
 
     // ★ 分享链接路线（用户方案 2026-09）：photoId 精确匹配 VM 窗口/活 Fragment 的
     // 照片对象——分享链接是快手自己认定的「这条视频」，零歧义
     fun findPhotoById(pid: String): Any? {
         if (pid.isBlank()) return null
         try {
-            val snapshot = synchronized(liveSlideFragments) { liveSlideFragments.toList() }
+            val snapshot = synchronized(CfhState.liveSlideFragments) { CfhState.liveSlideFragments.toList() }
             for (f in snapshot) {
                 val p = scanFragmentPhoto(f) ?: continue
                 if (readPhotoId(p) == pid) return p
             }
-            val vm = vmRef ?: return null
+            val vm = CfhState.vmRef ?: return null
             val i = Reflect.readAny(vm, "i") as? List<*> ?: return null
             for (el in i) {
                 val q = el?.let { findQpInObject(it) } ?: continue
@@ -1641,29 +1579,28 @@ object ContentFilterHook {
     // ★ 下载候选环（2026-09 终版）：自动判定「哪个是正在看的」在快速划页下永远有
     // 歧义——把最近划过的几条（可见页+预载页）全量列出，用户在下载菜单里自己点
     data class VisEntry(val photo: Any, val frag: Any?, val caption: String, val user: String)
-    private val visRing = java.util.ArrayDeque<VisEntry>()
 
     private fun ringPush(photo: Any, frag: Any?) {
         try {
-            synchronized(visRing) {
+            synchronized(CfhState.visRing) {
                 val cap = CfhUtil.readCaption(photo) ?: ""
                 val user = readVisibleUserName(photo)
                 // ★ 按「文案+作者」去重：同一视频的不同对象实例（M 字段/窗口匹配）
                 // 身份不同但内容相同，身份去重会留重复项
-                visRing.removeAll { (it.caption == cap && it.user == user) }
-                visRing.addLast(VisEntry(photo, frag, cap, user))
-                while (visRing.size > 6) visRing.removeFirst()
+                CfhState.visRing.removeAll { (it.caption == cap && it.user == user) }
+                CfhState.visRing.addLast(VisEntry(photo, frag, cap, user))
+                while (CfhState.visRing.size > 6) CfhState.visRing.removeFirst()
             }
         } catch (_: Throwable) {}
     }
 
     fun visibleEntries(): List<VisEntry> {
         try { currentFeedPhoto() } catch (_: Throwable) {}
-        return synchronized(visRing) { visRing.toList().reversed() }
+        return synchronized(CfhState.visRing) { CfhState.visRing.toList().reversed() }
     }
 
     private fun scanFragmentPhoto(frag: Any): Any? {
-        val qpClass = qpClassRef ?: return null
+        val qpClass = CfhState.qpClassRef ?: return null
         var c: Class<*>? = frag.javaClass
         var lvl = 0
         while (c != null && c != Any::class.java && lvl < 5) {
@@ -1699,26 +1636,21 @@ object ContentFilterHook {
                 chain.proceed()
                 try {
                     Logger.d("nasaCls real: ${chain.thisObject.javaClass.name} loader=${chain.thisObject.javaClass.classLoader}")
-                    realFragClass = chain.thisObject.javaClass
-                    hookFragCallSeq(xp, realFragClass!!)
+                    CfhState.realFragClass = chain.thisObject.javaClass
+                    hookFragCallSeq(xp, CfhState.realFragClass!!)
                 } catch (_: Throwable) {}
                 try { findDataSource(chain.thisObject) } catch (_: Throwable) {}
-                try { liveSlideFragments.add(chain.thisObject) } catch (_: Throwable) {}
-                handler.postDelayed({ try { diagFragment(chain.thisObject) } catch (_: Throwable) {} }, 500)
+                try { CfhState.liveSlideFragments.add(chain.thisObject) } catch (_: Throwable) {}
+                CfhState.handler.postDelayed({ try { diagFragment(chain.thisObject) } catch (_: Throwable) {} }, 500)
                 null
             }
         }
         hookFragQpSetters(xp, c)
     }
-    @Volatile private var realFragClass: Class<*>? = null
-    private val fragSeqHookedClasses = mutableSetOf<String>()
-    private val fragSeqCount = java.util.concurrent.atomic.AtomicInteger(0)
-    private var vpBlockDiag = 0
-    private var gqDumpCount = 0
 
     private fun hookFragCallSeq(xp: XposedInterface, fragClass: Class<*>) {
         val clsKey = fragClass.name + "@" + System.identityHashCode(fragClass.classLoader)
-        val isNew = synchronized(fragSeqHookedClasses) { fragSeqHookedClasses.add(clsKey) }
+        val isNew = synchronized(CfhState.fragSeqHookedClasses) { CfhState.fragSeqHookedClasses.add(clsKey) }
         if (!isNew) return
         var hookOk = 0
         Logger.d("fragSeqInstall start: ${fragClass.name}")
@@ -1732,7 +1664,7 @@ object ContentFilterHook {
                 Logger.safe("hookFragSeq.${m.name}") {
                     xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("fragSeq.${cls!!.name}.${m.name}").intercept { chain ->
                         try {
-                            val n = fragSeqCount.incrementAndGet()
+                            val n = CfhState.fragSeqCount.incrementAndGet()
                             if (n <= 50) {
                                 val argsDesc = chain.args.joinToString(",") { a -> a?.javaClass?.simpleName ?: "null" }.take(120)
                                 Logger.d("fragSeq #$n ${m.name}($argsDesc) in ${cls!!.simpleName}")
@@ -1742,14 +1674,14 @@ object ContentFilterHook {
                                 if (a0 != null) {
                                     if (m.name == "aq") {
                                         try {
-                                            vmRef = a0
+                                            CfhState.vmRef = a0
                                             filterVmLists(a0)
                                         } catch (_: Throwable) {}
                                     }
                                     val qpFound = findQpInObject(a0)
                                     val qpHit = qpFound?.let { shouldFilterFeed(it) } == true
-                                    if (gqDumpCount < 8) {
-                                        gqDumpCount++
+                                    if (CfhState.gqDumpCount < 8) {
+                                        CfhState.gqDumpCount++
                                         Logger.d("fragArg ${m.name}: cls=${a0.javaClass.name} qpIn=${qpFound != null} qpHit=$qpHit")
                                     }
                                     // ★ Vp 拦绑定已拆除（真机 22:40 闪退实证）：阻断绑定会造出
@@ -1757,9 +1689,9 @@ object ContentFilterHook {
                                     // PhotoDetailLogger）永不注入 → 下一个生命周期 onPause 空
                                     // 指针闪退。渲染层拦截在这个框架版本上不安全，脏数据全部
                                     // 交给数据层清洗（filterVmLists/laFind/sanitize 毫秒级摘除）
-                                    if (m.name == "Vp" && qpHit && vpBlockDiag < 20) {
-                                        vpBlockDiag++
-                                        Logger.always("Vp dirty-pass #$vpBlockDiag: ${a0.javaClass.name}")
+                                    if (m.name == "Vp" && qpHit && CfhState.vpBlockDiag < 20) {
+                                        CfhState.vpBlockDiag++
+                                        Logger.always("Vp dirty-pass #${CfhState.vpBlockDiag}: ${a0.javaClass.name}")
                                     }
 
                                 }
@@ -1776,7 +1708,6 @@ object ContentFilterHook {
     }
 
 
-    private val fragSetterHooked = mutableSetOf<String>()
     private fun hookFragQpSetters(xp: XposedInterface, fragClass: Class<*>) {
         var cls: Class<*>? = fragClass
         var lvl = 0
@@ -1785,7 +1716,7 @@ object ContentFilterHook {
                 if (!m.parameterTypes.any { it.name.contains("QPhoto") }) continue
                 // ★ 去重键含 classloader 身份（hookKey）：插件化二 loader 同名类不漏装
                 val key = CfhUtil.hookKey(cls!!) + "." + m.name
-                val shouldHook = synchronized(fragSetterHooked) { fragSetterHooked.add(key) }
+                val shouldHook = synchronized(CfhState.fragSetterHooked) { CfhState.fragSetterHooked.add(key) }
                 if (!shouldHook) continue
                 Logger.d("hook frag qp setter: ${m.name}(${m.parameterTypes.map { it.simpleName }.joinToString(",")}) in ${cls.name}")
                 Logger.safe("hookFragSet.${m.name}") {
@@ -1793,7 +1724,7 @@ object ContentFilterHook {
                         try {
                             for (i in chain.args.indices) {
                                 val a = chain.args[i] ?: continue
-                                if (qpClassRef?.isAssignableFrom(a.javaClass) == true && shouldFilterFeed(a)) {
+                                if (CfhState.qpClassRef?.isAssignableFrom(a.javaClass) == true && shouldFilterFeed(a)) {
                                     val clean = findCleanQp()
                                     if (clean != null) {
                                         Logger.d("fragSet ${m.name} replaced: ${CfhUtil.readCaption(a)?.take(15)} -> ${CfhUtil.readCaption(clean)?.take(15)}")
@@ -1812,46 +1743,33 @@ object ContentFilterHook {
         }
     }
 
-    @Volatile private var inFindClean = false
-    private var lastClean: Any? = null
-    private var vmReplacedDiag = 0
-    private var offerDiag = 0
-    private var findCleanDiag = 0
-    private var vmRetNameDiag = 0
-    private var vmKeepDiag = 0
-    private val cleanQueue = ArrayDeque<Any>()
     private fun offerClean(qp: Any) {
         val ent = Reflect.readAny(qp, "mEntity")
-        if (ent == null) { if (offerDiag < 20) { offerDiag++; Logger.d("offer skip: noEntity") }; return }
+        if (ent == null) { if (CfhState.offerDiag < 20) { CfhState.offerDiag++; Logger.d("offer skip: noEntity") }; return }
         if (!ent.javaClass.name.contains("feed.VideoFeed")) {
-            if (offerDiag < 20) { offerDiag++; Logger.d("offer skip: nonVF ${ent.javaClass.simpleName}") }
+            if (CfhState.offerDiag < 20) { CfhState.offerDiag++; Logger.d("offer skip: nonVF ${ent.javaClass.simpleName}") }
             return
         }
-        if (Reflect.readAny(ent, "mPhotoMeta") == null) { if (offerDiag < 20) { offerDiag++; Logger.d("offer skip: noMeta") }; return }
+        if (Reflect.readAny(ent, "mPhotoMeta") == null) { if (CfhState.offerDiag < 20) { CfhState.offerDiag++; Logger.d("offer skip: noMeta") }; return }
         // ★ 加锁：offerClean（任意 hook 线程）与 pickFromQueue（cleanExecutor）
         // 无锁并发操作普通 ArrayDeque 会丢项/竞态（同文件 cleanCachePersist 有锁）
-        synchronized(cleanQueue) {
-            if (cleanQueue.any { it === qp }) return
-            if (cleanQueue.size >= 12) cleanQueue.removeFirst()
-            cleanQueue.add(qp)
+        synchronized(CfhState.cleanQueue) {
+            if (CfhState.cleanQueue.any { it === qp }) return
+            if (CfhState.cleanQueue.size >= 12) CfhState.cleanQueue.removeFirst()
+            CfhState.cleanQueue.add(qp)
         }
         // 持久缓存：跨窗口不排空，兜底替换�?
-        synchronized(cleanCachePersist) {
-            if (cleanCachePersist.none { it === qp }) {
-                if (cleanCachePersist.size >= 60) cleanCachePersist.removeFirst()
-                cleanCachePersist.addLast(qp)
+        synchronized(CfhState.cleanCachePersist) {
+            if (CfhState.cleanCachePersist.none { it === qp }) {
+                if (CfhState.cleanCachePersist.size >= 60) CfhState.cleanCachePersist.removeFirst()
+                CfhState.cleanCachePersist.addLast(qp)
             }
         }
         recordCleanUrl(ent)
-        if (offerDiag < 30) { offerDiag++; Logger.d("offer add: ${CfhUtil.readCaption(qp)?.take(14)} queue=${cleanQueue.size}") }
+        if (CfhState.offerDiag < 30) { CfhState.offerDiag++; Logger.d("offer add: ${CfhUtil.readCaption(qp)?.take(14)} queue=${CfhState.cleanQueue.size}") }
     }
 
-    private val cleanCachePersist = ArrayDeque<Any>()
 
-    private val dirtyUrls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
-    private val cleanUrlPool = ArrayDeque<String>()
-    private val hookedVmUrlClasses = mutableSetOf<String>()
-    private var urlSubCount = 0
 
     private fun readVideoUrl(ent: Any): String? {
         return try {
@@ -1862,10 +1780,10 @@ object ContentFilterHook {
 
     private fun recordCleanUrl(ent: Any) {
         val url = readVideoUrl(ent) ?: return
-        synchronized(cleanUrlPool) {
-            if (cleanUrlPool.none { it == url }) {
-                if (cleanUrlPool.size >= 30) cleanUrlPool.removeFirst()
-                cleanUrlPool.addLast(url)
+        synchronized(CfhState.cleanUrlPool) {
+            if (CfhState.cleanUrlPool.none { it == url }) {
+                if (CfhState.cleanUrlPool.size >= 30) CfhState.cleanUrlPool.removeFirst()
+                CfhState.cleanUrlPool.addLast(url)
             }
         }
     }
@@ -1873,8 +1791,8 @@ object ContentFilterHook {
     private fun recordDirtyUrl(ent: Any) {
         val url = readVideoUrl(ent) ?: return
         if (url.isBlank()) return
-        dirtyUrls.add(url)
-        if (dirtyUrls.size > 300) dirtyUrls.clear()
+        CfhState.dirtyUrls.add(url)
+        if (CfhState.dirtyUrls.size > 300) CfhState.dirtyUrls.clear()
         try {
             val vm = Reflect.readAny(ent, "mVideoModel") ?: return
             hookVideoModelClass(vm.javaClass)
@@ -1882,12 +1800,11 @@ object ContentFilterHook {
         hookPlayerClasses()
     }
 
-    private var playerHookTried = false
     private fun hookPlayerClasses() {
-        if (playerHookTried) return
-        playerHookTried = true
-        val xp = xpRef ?: return
-        val appCl = qpClassRef?.classLoader ?: vmRef?.javaClass?.classLoader ?: return
+        if (CfhState.playerHookTried) return
+        CfhState.playerHookTried = true
+        val xp = CfhState.xpRef ?: return
+        val appCl = CfhState.qpClassRef?.classLoader ?: CfhState.vmRef?.javaClass?.classLoader ?: return
         for (cn in listOf(
             "com.kwai.video.player.KwaiMediaPlayerWrapper",
             "com.kwai.video.player.KwaiMediaPlayerImplV3",
@@ -1905,11 +1822,11 @@ object ContentFilterHook {
                         try {
                             val a0 = chain.args.getOrNull(0)
                             if (a0 is String && a0.isNotBlank()) {
-                                val dirty = dirtyUrls.any { a0.startsWith(it) || it.startsWith(a0) }
+                                val dirty = CfhState.dirtyUrls.any { a0.startsWith(it) || it.startsWith(a0) }
                                 if (dirty) {
-                                    val clean = synchronized(cleanUrlPool) { cleanUrlPool.firstOrNull { it != a0 } }
+                                    val clean = synchronized(CfhState.cleanUrlPool) { CfhState.cleanUrlPool.firstOrNull { it != a0 } }
                                     if (clean != null) {
-                                        if (urlSubCount < 20) { urlSubCount++; Logger.d("player ${m.name} -> clean: ${a0.take(36)}") }
+                                        if (CfhState.urlSubCount < 20) { CfhState.urlSubCount++; Logger.d("player ${m.name} -> clean: ${a0.take(36)}") }
                                         chain.args[0] = clean
                                     }
                                 }
@@ -1924,8 +1841,8 @@ object ContentFilterHook {
     }
 
     private fun hookVideoModelClass(c: Class<*>) {
-        val xp = xpRef ?: return
-        synchronized(hookedVmUrlClasses) { if (!hookedVmUrlClasses.add(c.name)) return }
+        val xp = CfhState.xpRef ?: return
+        synchronized(CfhState.hookedVmUrlClasses) { if (!CfhState.hookedVmUrlClasses.add(c.name)) return }
         for (m in c.methods) {
             if (m.returnType != String::class.java || m.parameterTypes.isNotEmpty()) continue
             val nm = m.name.lowercase()
@@ -1935,11 +1852,11 @@ object ContentFilterHook {
                     val r = chain.proceed()
                     try {
                         if (r is String && r.isNotBlank()) {
-                            val dirty = dirtyUrls.any { r.startsWith(it) || it.startsWith(r) }
+                            val dirty = CfhState.dirtyUrls.any { r.startsWith(it) || it.startsWith(r) }
                             if (dirty) {
-                                val clean = synchronized(cleanUrlPool) { cleanUrlPool.firstOrNull { it != r } }
+                                val clean = synchronized(CfhState.cleanUrlPool) { CfhState.cleanUrlPool.firstOrNull { it != r } }
                                 if (clean != null) {
-                                    if (urlSubCount < 20) { urlSubCount++; Logger.d("vm url ${m.name} -> clean: ${r.take(36)}") }
+                                    if (CfhState.urlSubCount < 20) { CfhState.urlSubCount++; Logger.d("vm url ${m.name} -> clean: ${r.take(36)}") }
                                     return@intercept clean
                                 }
                             }
@@ -1951,30 +1868,30 @@ object ContentFilterHook {
         }
     }
     private fun pickFromQueue(): Any? {
-        val qpClass = qpClassRef ?: return null
+        val qpClass = CfhState.qpClassRef ?: return null
         var idx = 0
         // ★ lastClean 的「换条」判定必须在同一把锁下完成（审阅 2026-09）：原先队列段
         // 在 cleanQueue 锁、持久缓存段在 cleanCachePersist 锁，两线程可同时读到旧
         // lastClean 并返回同一条干净视频 → 两个脏位替换成同一视频。
         // offerClean 对两锁是顺序持有（无嵌套），此处 cleanQueue→cleanCachePersist
         // 嵌套无锁序倒置风险
-        synchronized(cleanQueue) {
-            while (cleanQueue.isNotEmpty() && idx < 24) {
-                val head = cleanQueue.removeFirst()
+        synchronized(CfhState.cleanQueue) {
+            while (CfhState.cleanQueue.isNotEmpty() && idx < 24) {
+                val head = CfhState.cleanQueue.removeFirst()
                 idx++
                 if (qpClass.isAssignableFrom(head.javaClass) && !shouldFilterFeed(head)) {
-                    cleanQueue.add(head)
-                    if (head !== lastClean || cleanQueue.size == 1) {
-                        lastClean = head
+                    CfhState.cleanQueue.add(head)
+                    if (head !== CfhState.lastClean || CfhState.cleanQueue.size == 1) {
+                        CfhState.lastClean = head
                         return head
                     }
                 }
             }
             // 持久缓存兜底
-            synchronized(cleanCachePersist) {
-                for (c in cleanCachePersist) {
-                    if (qpClass.isAssignableFrom(c.javaClass) && !shouldFilterFeed(c) && c !== lastClean) {
-                        lastClean = c
+            synchronized(CfhState.cleanCachePersist) {
+                for (c in CfhState.cleanCachePersist) {
+                    if (qpClass.isAssignableFrom(c.javaClass) && !shouldFilterFeed(c) && c !== CfhState.lastClean) {
+                        CfhState.lastClean = c
                         return c
                     }
                 }
@@ -1983,12 +1900,12 @@ object ContentFilterHook {
         return null
     }
     private fun findCleanQp(): Any? {
-        if (inFindClean) return null
-        val vm = vmRef
+        if (CfhState.inFindClean) return null
+        val vm = CfhState.vmRef
         if (vm == null) return null
         pickFromQueue()?.let { return it }
         // 轻量补充：仅�?VM 窗口字段 i（不�?T0/U0，避免反射副作用/异常�?
-        inFindClean = true
+        CfhState.inFindClean = true
         try {
             val i = try { Reflect.readAny(vm, "i") } catch (_: Throwable) { null }
             if (i is List<*>) {
@@ -1997,7 +1914,7 @@ object ContentFilterHook {
                     if (q != null && !shouldFilterFeed(q)) offerClean(q)
                 }
             }
-        } finally { inFindClean = false }
+        } finally { CfhState.inFindClean = false }
         return pickFromQueue()
     }
 
@@ -2008,7 +1925,7 @@ object ContentFilterHook {
         if (targetType?.contains("LiveStreamFeed") == true) return 0
         val cleanType = try { Reflect.readAny(cleanQp, "mEntity")?.javaClass?.name } catch (_: Throwable) { null }
         if (cleanType?.contains("LiveStreamFeed") == true) return 0
-        val qpClass = qpClassRef ?: return 0
+        val qpClass = CfhState.qpClassRef ?: return 0
         var swapped = 0
         val visited = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Any, Boolean>())
         val queue = ArrayDeque<Any>()
@@ -2042,7 +1959,7 @@ object ContentFilterHook {
     }
 
     private fun dataSwallow(reason: String) {
-        if (dataDiag < 40) { dataDiag++; Logger.d("DATA skip $reason") }
+        if (CfhState.dataDiag < 40) { CfhState.dataDiag++; Logger.d("DATA skip $reason") }
     }
 
 
@@ -2131,11 +2048,11 @@ object ContentFilterHook {
     private fun captureFeedItem(qp: Any) {
         try {
             val id = System.identityHashCode(qp)
-            if (capturedIds.contains(id)) return
-            if (capturedIds.size >= 400) capturedIds.clear()
-            capturedIds.add(id)
-            if (capturedLines >= 1500) return
-            capturedLines++
+            if (CfhState.capturedIds.contains(id)) return
+            if (CfhState.capturedIds.size >= 400) CfhState.capturedIds.clear()
+            CfhState.capturedIds.add(id)
+            if (CfhState.capturedLines >= 1500) return
+            CfhState.capturedLines++
             val ent = Reflect.readAny(qp, "mEntity") ?: run { dataSwallow("noEnt"); return }
             val cm = Reflect.readAny(ent, "mPhotoMeta")
             val cap = cm?.let { Reflect.readString(it, "mCaption") } ?: ""
@@ -2176,9 +2093,9 @@ object ContentFilterHook {
             // 直播卡：dump 全部字段找特�?
             if (ent.javaClass.name.contains("LiveStreamFeed")) {
                 val ik = System.identityHashCode(ent)
-                if (liveDumped.add(ik)) {
-                    if (liveDumpCount < 60) {
-                        liveDumpCount++
+                if (CfhState.liveDumped.add(ik)) {
+                    if (CfhState.liveDumpCount < 60) {
+                        CfhState.liveDumpCount++
                         Logger.d("LIVEDUMP ${dumpKV(ent)}")
                     }
                 }
@@ -2186,9 +2103,9 @@ object ContentFilterHook {
             // 广告/影视卡：dump 内层标题元数�?
             if (serial != null || column != null || adNovel != null || nativeD != null || ltos != null) {
                 val ik = System.identityHashCode(ent)
-                if (dramaDumped.add(ik)) {
-                    if (dramaDumpCount < 100) {
-                        dramaDumpCount++
+                if (CfhState.dramaDumped.add(ik)) {
+                    if (CfhState.dramaDumpCount < 100) {
+                        CfhState.dramaDumpCount++
                         val sb = StringBuilder("DRAMADUMP cap=\"$capEsc\"")
                         if (serial != null) {
                             val dm = Reflect.readAny(serial, "dataMap")
@@ -2221,18 +2138,7 @@ object ContentFilterHook {
         } catch (t: Throwable) { dataSwallow("err ${t.javaClass.simpleName}") }
     }
 
-    @Volatile private var dataDiag = 0
-    private var capturedLines = 0
-    private var liveDumpCount = 0
-    private var dramaDumpCount = 0
-    private val liveDumped = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Int, Boolean>())
-    private val dramaDumped = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Int, Boolean>())
-    private val capturedIds = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Int, Boolean>())
 
-    private var pagerCache: Any? = null
-    private var holderDumpCount = 0
-    private var vmGetSubCount = 0
-    private var vmMethodDump = 0
 
     // dump holder 图 / dumpMilanoHolder / forceRebindCurrent / applyWindowClean /
     // findCleanPos / adapterMainList 已删除：grep 证实零调用死代码（R8 release 亦剥离）
@@ -2240,7 +2146,7 @@ object ContentFilterHook {
     // �?vm 窗口取同位置富数�?qp（显示源实例，带完整 user/caption�?
     private fun findWindowQp(pos: Int): Any? {
         try {
-            val vm = vmRef ?: return null
+            val vm = CfhState.vmRef ?: return null
             val i = Reflect.readAny(vm, "i") as? List<*> ?: return null
             if (i.isEmpty()) return null
             val idx = if (pos < 0) 0 else pos % i.size
@@ -2274,7 +2180,7 @@ object ContentFilterHook {
 
     private fun findDataSource(frag: Any) {
         Logger.safe("findDataSource") {
-            val qc = qpClassRef
+            val qc = CfhState.qpClassRef
             var vm: Any? = null
             var c: Class<*>? = frag.javaClass
             var lvl = 0
@@ -2338,14 +2244,11 @@ object ContentFilterHook {
         }
     }
 
-    private var fragDiagCount = 0
-    private var fragMethodsDiag = false
-    private var fragFieldsDiag = false
 
     private fun diagFragment(frag: Any) {
         Logger.safe("diagFrag") {
-            val qpClass = qpClassRef ?: return@safe
-            val vm = vmRef
+            val qpClass = CfhState.qpClassRef ?: return@safe
+            val vm = CfhState.vmRef
             // ★ 只记录真正可见的页（下载捕获锚点，2026-09）：slide 播放器会预加载
             // 邻页，邻页同样走 onResume——用 localVisibleRect 判定，离屏页视口的
             // 可见矩形为空直接跳过
@@ -2356,8 +2259,8 @@ object ContentFilterHook {
                 if (vr.width() <= 0 || vr.height() <= 0) return@safe
             }
             // 字段级排查：Fragment 持有视频数据的字段（类型�?Photo/QPhoto 或值含文案�?
-            if (!fragFieldsDiag) {
-                fragFieldsDiag = true
+            if (!CfhState.fragFieldsDiag) {
+                CfhState.fragFieldsDiag = true
                 var mc: Class<*>? = frag.javaClass
                 var mlvl = 0
                 var printed = 0
@@ -2379,8 +2282,8 @@ object ContentFilterHook {
                     mc = mc.superclass; mlvl++
                 }
             }
-            if (!fragMethodsDiag) {
-                fragMethodsDiag = true
+            if (!CfhState.fragMethodsDiag) {
+                CfhState.fragMethodsDiag = true
                 var mc: Class<*>? = frag.javaClass
                 var mlvl = 0
                 while (mc != null && mc != Any::class.java && mlvl < 5) {
@@ -2392,9 +2295,9 @@ object ContentFilterHook {
                     mc = mc.superclass; mlvl++
                 }
             }
-            if (!feedPagerFound) {
+            if (!CfhState.feedPagerFound) {
                 try {
-                    val act = tracked
+                    val act = CfhState.tracked
                     val decor = act?.window?.decorView as? ViewGroup
                     if (decor != null) {
                         findPager(decor)
@@ -2413,9 +2316,9 @@ object ContentFilterHook {
                         if (qpClass.isAssignableFrom(v.javaClass)) {
                             val hit = shouldFilterFeed(v)
                             val cap = CfhUtil.readCaption(v)
-                            fragDiagCount++
-                            if (fragDiagCount <= 5 || fragDiagCount % 100 == 0) {
-                                Logger.d("frag M #$fragDiagCount: hit=$hit cap=${cap?.take(25)}")
+                            CfhState.fragDiagCount++
+                            if (CfhState.fragDiagCount <= 5 || CfhState.fragDiagCount % 100 == 0) {
+                                Logger.d("frag M #${CfhState.fragDiagCount}: hit=$hit cap=${cap?.take(25)}")
                             }
                             if (hit && vm != null) {
                                 var clean: Any? = null
@@ -2441,7 +2344,7 @@ object ContentFilterHook {
                                 visibleStored = true
                                 try {
                                     val ph = f.get(frag) ?: v
-                                    visiblePhotoRef = java.lang.ref.WeakReference(ph)
+                                    CfhState.visiblePhotoRef = java.lang.ref.WeakReference(ph)
                                     // ★ 入候选环（实证可靠路径）：diagFragment 每次可见页
                                     // 扫描都能出 DL vis——这是唯一被证明稳定的来源
                                     ringPush(ph, frag)
@@ -2457,10 +2360,6 @@ object ContentFilterHook {
     }
 
 
-    private val hookedAdpClasses = mutableSetOf<String>()
-    private var feedPagerFound = false
-    private var feedPagerLogCount = 0
-    private var adpDumpCount = 0
     private fun findPager(v: View) {
         val n = v.javaClass.name
         val isPager = n.contains("CustomAnimationViewPager") || n.contains("ScrollStrategyViewPager") ||
@@ -2471,39 +2370,39 @@ object ContentFilterHook {
             // ★ 陈旧引用失效（审阅 2026-09）：Activity 重建后旧 pager 已 detach，但
             // pagerCache 此前只在 null 时更新——旧 Activity 视图链被静态强引用至进程
             // 结束，且 check/laFind 持续对死对象做功。缓存 detached 时允许覆盖刷新
-            val stale = (pagerCache as? View)?.isAttachedToWindow == false
-            if (pagerCache == null || stale) pagerCache = v
+            val stale = (CfhState.pagerCache as? View)?.isAttachedToWindow == false
+            if (CfhState.pagerCache == null || stale) CfhState.pagerCache = v
             try { hookPagerClass(v.javaClass) } catch (_: Throwable) {}
             val adp = try { Reflect.callMethod(v, "getAdapter") } catch (_: Throwable) { null }
             if (adp == null) {
-                if (feedPagerFound && !stale) return
+                if (CfhState.feedPagerFound && !stale) return
                 Logger.safe("feedPagerNoAdp") { Logger.d("feedPager found but no adapter yet: ${v.javaClass.name}") }
                 return
             }
-            val isFirst = !feedPagerFound || stale
-            feedPagerFound = true
+            val isFirst = !CfhState.feedPagerFound || stale
+            CfhState.feedPagerFound = true
             if (isFirst) {
-                adpRef = adp
-                pagerCache = v
+                CfhState.adpRef = adp
+                CfhState.pagerCache = v
             }
-            if (feedPagerLogCount < 20) {
-                feedPagerLogCount++
+            if (CfhState.feedPagerLogCount < 20) {
+                CfhState.feedPagerLogCount++
                 Logger.safe("feedPagerLog") { Logger.d("feedPager: ${v.javaClass.name} adp=${adp.javaClass.name} first=$isFirst") }
             }
             try {
-                if (adpRefs.none { it === adp }) {
+                if (CfhState.adpRefs.none { it === adp }) {
                     // ★ 上限防泄漏（审阅 2026-09）：adpRefs 原先只增不减，每次 Activity
                     // 重建新增一个 adapter 强引用。超 6 个先清空再留当前代际（laFind 只
                     // 把这里当候选根集，旧代际无价值）
-                    if (adpRefs.size >= 6) adpRefs.clear()
-                    adpRefs.add(adp)
+                    if (CfhState.adpRefs.size >= 6) CfhState.adpRefs.clear()
+                    CfhState.adpRefs.add(adp)
                 }
             } catch (_: Throwable) {}
             if (adp.javaClass.name.startsWith("l3c")) Logger.d("feedPager DETAIL-adp: ${adp.javaClass.name} pager=${v.javaClass.simpleName}")
             // ★ 从 adapter 反向找 VM（fragSeq aq 未调用时的替代路径）：
             // 扫 adapter 字段找 SlidePlayViewModel，设 vmRef + hookViewModel + filterVmLists
-            if (vmRef == null) {
-                if (adpDumpCount < 3) { adpDumpCount++; val sb = StringBuilder("ADPDUMP ${adp.javaClass.name}:"); var dc: Class<*>? = adp.javaClass; var dl = 0; while (dc != null && dc != Any::class.java && dl < 4) { for (df in dc!!.declaredFields) { if (java.lang.reflect.Modifier.isStatic(df.modifiers)) continue; try { df.isAccessible = true; val dv = df.get(adp); sb.append(" ${df.name}=${dv?.javaClass?.simpleName ?: "null"}") } catch (_: Throwable) {} }; dc = dc.superclass; dl++ }; Logger.d(sb.toString()) }
+            if (CfhState.vmRef == null) {
+                if (CfhState.adpDumpCount < 3) { CfhState.adpDumpCount++; val sb = StringBuilder("ADPDUMP ${adp.javaClass.name}:"); var dc: Class<*>? = adp.javaClass; var dl = 0; while (dc != null && dc != Any::class.java && dl < 4) { for (df in dc!!.declaredFields) { if (java.lang.reflect.Modifier.isStatic(df.modifiers)) continue; try { df.isAccessible = true; val dv = df.get(adp); sb.append(" ${df.name}=${dv?.javaClass?.simpleName ?: "null"}") } catch (_: Throwable) {} }; dc = dc.superclass; dl++ }; Logger.d(sb.toString()) }
                 var c2: Class<*>? = adp.javaClass
                 var lvl2 = 0
                 while (c2 != null && c2 != Any::class.java && lvl2 < 4) {
@@ -2513,7 +2412,7 @@ object ContentFilterHook {
                             f2.isAccessible = true
                             val fv = f2.get(adp) ?: continue
                             if (fv.javaClass.name.contains("SlidePlay") || fv.javaClass.name.contains("ViewModel")) {
-                                vmRef = fv
+                                CfhState.vmRef = fv
                                 Logger.always("vmFromAdp: ${fv.javaClass.name} via ${f2.name}")
                                 try { hookViewModel(fv) } catch (_: Throwable) {}
                                 try { filterVmLists(fv) } catch (_: Throwable) {}
@@ -2521,7 +2420,7 @@ object ContentFilterHook {
                             }
                         } catch (_: Throwable) {}
                     }
-                    if (vmRef != null) break
+                    if (CfhState.vmRef != null) break
                     c2 = c2.superclass; lvl2++
                 }
             }
@@ -2529,7 +2428,7 @@ object ContentFilterHook {
             // ★ 持续清洗：vmFromAdp 首次设 vmRef 后 filterVmLists 只调了一次（此时 i 可能空）。
             // 后续 feed 数据加载后 i 被填充，但 fragSeq aq 不调用 → filterVmLists 不再触发。
             // findPager 每 ~3s 由 check() 触发，此处补调 filterVmLists（500ms 节流自防过度）
-        if (vmRef != null) { try { filterVmLists(vmRef!!) } catch (_: Throwable) {} }
+        if (CfhState.vmRef != null) { try { filterVmLists(CfhState.vmRef!!) } catch (_: Throwable) {} }
         // LAFIND：脏元素身份反查真源字段（诊断用）
         if (!Logger.quiet) try { laFind() } catch (_: Throwable) {}
 
@@ -2553,16 +2452,15 @@ object ContentFilterHook {
         }
     }
 
-    private val hookedPagerCls = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
     // ScrollStrategyViewPager 等横滑 pager：hook 其基类(含 androidx ViewPager)的 instantiateItem/getItem/adapter 相关
     private fun hookPagerClass(startCls: Class<*>) {
         try {
-            val xp = xpRef ?: return
+            val xp = CfhState.xpRef ?: return
             var cc: Class<*>? = startCls
             var lvl = 0
             while (cc != null && cc != Any::class.java && lvl < 6) {
                 val clsNow = cc
-                if (!hookedPagerCls.add(CfhUtil.hookKey(clsNow))) { cc = cc.superclass; lvl++; continue }
+                if (!CfhState.hookedPagerCls.add(CfhUtil.hookKey(clsNow))) { cc = cc.superclass; lvl++; continue }
                 for (m in clsNow.declaredMethods) {
                     val nm = m.name
                     if (!m.returnType.isPrimitive && m.returnType != Void.TYPE &&
@@ -2576,22 +2474,22 @@ object ContentFilterHook {
                                     if (result != null) {
                                         val qp = findQpInObject(result)
                                         val hit = if (qp != null) shouldFilterFeed(qp) else false
-                                        if (pagerDiag < 25) {
-                                            pagerDiag++
+                                        if (CfhState.pagerDiag < 25) {
+                                            CfhState.pagerDiag++
                                             Logger.d("pager i ${nm}(#$pos) -> ${result.javaClass.simpleName} hit=$hit qp=${qp != null}")
                                         }
                                         if (qp != null && hit) {
                                             val clean = pickFromQueue()
                                             if (clean != null) {
                                                 val sw = writeQpInto(result, clean)
-                                                pagerSwapCount++
+                                                CfhState.pagerSwapCount++
                                                 Logger.d("pager swap ${nm}(#$pos) sw=$sw ${CfhUtil.readCaption(qp)?.take(15)}")
                                             }
-                                        } else if (qp != null && !hit && liveWindowDiag < 8) {
+                                        } else if (qp != null && !hit && CfhState.liveWindowDiag < 8) {
                                             // ★ 视频卡是否带"直播浮窗/进入直播间引导"：找 QP 树里的 live 状态字段
                                             val liveInfo = findLiveWindowField(qp)
                                             if (liveInfo != null) {
-                                                liveWindowDiag++
+                                                CfhState.liveWindowDiag++
                                                 Logger.d("LIVEWIN ${nm}(#$pos) $liveInfo cap=${CfhUtil.readCaption(qp)?.take(16)}")
                                             }
                                         }
@@ -2606,7 +2504,6 @@ object ContentFilterHook {
             }
         } catch (_: Throwable) {}
     }
-    private var liveWindowDiag = 0
     private fun findLiveWindowField(root: Any?): String? {
         if (root == null) return null
         try {
@@ -2657,14 +2554,10 @@ object ContentFilterHook {
         } catch (_: Throwable) {}
         return null
     }
-    private var pagerDiag = 0
-    private var pagerSwapCount = 0
 
-    private val hookedProvClasses = mutableSetOf<String>()
-    private var provDiag = false
     private fun hookDataProvider(c: Class<*>) {
-        val xp = xpRef ?: return
-        synchronized(hookedProvClasses) { if (!hookedProvClasses.add(c.name)) return }
+        val xp = CfhState.xpRef ?: return
+        synchronized(CfhState.hookedProvClasses) { if (!CfhState.hookedProvClasses.add(c.name)) return }
         Logger.d("hookDataProvider: ${c.name}")
         for (m in c.declaredMethods) {
             Logger.d("  prov m: ${m.name}(${m.parameterTypes.map { it.simpleName }.joinToString(",")}) -> ${m.returnType.simpleName}")
@@ -2674,8 +2567,8 @@ object ContentFilterHook {
                     xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("provL.${c.name}.${m.name}").intercept { chain ->
                         val result = chain.proceed()
                         try {
-                            if (!provDiag && result is MutableList<*> && result.isNotEmpty()) {
-                                provDiag = true
+                            if (!CfhState.provDiag && result is MutableList<*> && result.isNotEmpty()) {
+                                CfhState.provDiag = true
                                 val elem = result[0]
                                 Logger.d("provList diag: size=${result.size} elemCls=${elem?.javaClass?.name}")
                                 val qp = elem?.let { findQpInObject(it) }
@@ -2720,18 +2613,10 @@ object ContentFilterHook {
         }
     }
 
-    private var adpGetDiag = 0
-    private var adpGetLiveSkipDiag = 0
-    private var adpProvDiag = 0
-    private var adpQpDiag = 0
-    private var adpXDump = 0
-    private var adpXLiveZapDiag = 0
-    private var adpXRedirectDiag = 0
 
-    private val adpXDumped = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
     private fun hookPagerAdapter(c: Class<*>) {
-        val xp = xpRef ?: run { Logger.always("hookPagerAdapter skip: xpRef null"); return }
-        val added = synchronized(hookedAdpClasses) { hookedAdpClasses.add(CfhUtil.hookKey(c)) }
+        val xp = CfhState.xpRef ?: run { Logger.always("hookPagerAdapter skip: CfhState.xpRef null"); return }
+        val added = synchronized(CfhState.hookedAdpClasses) { CfhState.hookedAdpClasses.add(CfhUtil.hookKey(c)) }
         if (!added) { Logger.d("hookPagerAdapter dup: ${c.name}"); return }
         Logger.d("hookPagerAdapter: ${c.name}")
         // 诊断：dump 类层次全部方法，找数据供给方法
@@ -2774,7 +2659,7 @@ object ContentFilterHook {
                                             val nd = try { Reflect.callMethod(adp, "g0", np) as? List<*> } catch (_: Throwable) { null }
                                             if (nd != null && nd.isNotEmpty() && !nd.any { it != null && shouldFilterFeed(it) }) {
                                                 chain.args[1] = np
-                                                if (adpXRedirectDiag < 30) { adpXRedirectDiag++; Logger.d("adpX p REDIRECT #$pos -> #$np") }
+                                                if (CfhState.adpXRedirectDiag < 30) { CfhState.adpXRedirectDiag++; Logger.d("adpX p REDIRECT #$pos -> #$np") }
                                                 try { triggerRefresh() } catch (_: Throwable) {}
                                                 break
                                             }
@@ -2787,9 +2672,9 @@ object ContentFilterHook {
                             try {
                                 val pos = chain.args.lastOrNull() as? Int ?: -1
                                 val isPD = m.name == "p" || m.name == "D"
-                                val shouldDump = if (isPD) adpXDump < 40 && adpXDumped.add("pd_" + pos) else adpXDumped.add(qcn.name + "." + m.name) && adpXDump < 25
+                                val shouldDump = if (isPD) CfhState.adpXDump < 40 && CfhState.adpXDumped.add("pd_" + pos) else CfhState.adpXDumped.add(qcn.name + "." + m.name) && CfhState.adpXDump < 25
                                 if (shouldDump) {
-                                    adpXDump++
+                                    CfhState.adpXDump++
                                     Logger.d("adpX ${m.name} #$pos ret=${r?.javaClass?.name ?: "null"}")
                                     if (r != null && isPD) {
                                         var rc: Class<*>? = r.javaClass
@@ -2824,7 +2709,7 @@ object ContentFilterHook {
                             val a0 = chain.args[0]
                             if (a0 != null && shouldFilterFeed(a0)) {
                                 Logger.d("adp F blocked: ${CfhUtil.readCaption(a0)?.take(25)}")
-                                val vm = vmRef
+                                val vm = CfhState.vmRef
                                 if (vm != null) {
                                     var replaced = false
                                     for (i in 0 until 15) {
@@ -2878,10 +2763,10 @@ object ContentFilterHook {
                     if (isSupply) {
                         Logger.safe("hookAdpGet.${m.name}") {
                             xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adpGet.${c.name}.${m.name}").intercept { chain ->
-                                if (adpRef == null) adpRef = chain.thisObject
+                                if (CfhState.adpRef == null) CfhState.adpRef = chain.thisObject
                                 val result = chain.proceed()
                                 try {
-                                    if (result != null && !adpGetSwapIn) {
+                                    if (result != null && !CfhState.adpGetSwapIn) {
                                         val qp = findQpInObject(result)
                                         if (qp != null) captureFeedItem(qp)
                                         // ★ 位置↔条目权威映射（下载捕获 2026-09）：D(pos) 返回什么，
@@ -2891,12 +2776,12 @@ object ContentFilterHook {
                                             val dpos = (chain.args.getOrNull(0) as? Int) ?: -1
                                             if (dpos >= 0) {
                                                 val store = qp ?: scanFragmentPhoto(result)
-                                                if (store != null) synchronized(posPhotoMap) {
-                                                    posPhotoMap.remove(dpos)
-                                                    posPhotoMap[dpos] = java.lang.ref.WeakReference(store)
-                                                    while (posPhotoMap.size > 16) {
-                                                        val first = posPhotoMap.keys.firstOrNull() ?: break
-                                                        posPhotoMap.remove(first)
+                                                if (store != null) synchronized(CfhState.posPhotoMap) {
+                                                    CfhState.posPhotoMap.remove(dpos)
+                                                    CfhState.posPhotoMap[dpos] = java.lang.ref.WeakReference(store)
+                                                    while (CfhState.posPhotoMap.size > 16) {
+                                                        val first = CfhState.posPhotoMap.keys.firstOrNull() ?: break
+                                                        CfhState.posPhotoMap.remove(first)
                                                     }
                                                 }
                                             }
@@ -2921,8 +2806,8 @@ object ContentFilterHook {
                                         // fixAdapterSelfAlways + filterVmLists/laFind + fragSeq Vp 拦绑定
                                         // 兜底——稳定性优先，代价是脏卡上屏后零点几秒内消失
                                         if ((clsQp != null && shouldFilterFeed(clsQp)) || holderLive || holderDirtyEnt != null) {
-                                            if (adpGetLiveSkipDiag < 40) {
-                                                adpGetLiveSkipDiag++
+                                            if (CfhState.adpGetLiveSkipDiag < 40) {
+                                                CfhState.adpGetLiveSkipDiag++
                                                 Logger.always("adpGet dirty #$pos defer-clean qp=${clsQp != null && shouldFilterFeed(clsQp)} live=$holderLive ent=${holderDirtyEnt != null}")
                                             }
                                         }
@@ -2931,13 +2816,13 @@ object ContentFilterHook {
                                             try { offerClean(qp) } catch (_: Throwable) {}
                                         }
                                         // ===== 原诊断（节流�?=====
-                                        if (adpGetDiag < 10) {
-                                            adpGetDiag++
+                                        if (CfhState.adpGetDiag < 10) {
+                                            CfhState.adpGetDiag++
                                             qp?.let { q0 ->
                                                 Logger.d("adpGet ${m.name}(#${chain.args[0]}) ret=${result.javaClass.name} qp hit=${shouldFilterFeed(q0)} cap=${CfhUtil.readCaption(q0)?.take(20)}")
                                             }
-                                            if (!adpSelfDumped) {
-                                                adpSelfDumped = true
+                                            if (!CfhState.adpSelfDumped) {
+                                                CfhState.adpSelfDumped = true
                                                 dumpAdapterSelf(chain.thisObject)
                                             }
                                         }
@@ -2954,8 +2839,8 @@ object ContentFilterHook {
                             xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adpProv.${c.name}.${m.name}").intercept { chain ->
                                 val result = chain.proceed()
                                 try {
-                                    if (result != null && adpProvDiag < 10) {
-                                        adpProvDiag++
+                                    if (result != null && CfhState.adpProvDiag < 10) {
+                                        CfhState.adpProvDiag++
                                         Logger.d("adpProv ${m.name}() ret=${result.javaClass.name}")
                                         if (result.javaClass.name != "com.yxcorp.gifshow.entity.QPhoto") {
                                             dumpProvider(result)
@@ -2969,9 +2854,9 @@ object ContentFilterHook {
                         Logger.safe("hookAdpQp.${m.name}") {
                             xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adpQp.${c.name}.${m.name}").intercept { chain ->
                                 try {
-                                    val qp = chain.args.firstOrNull { it != null && qpClassRef?.isAssignableFrom(it.javaClass) == true }
-                                    if (qp != null && adpQpDiag < 15) {
-                                        adpQpDiag++
+                                    val qp = chain.args.firstOrNull { it != null && CfhState.qpClassRef?.isAssignableFrom(it.javaClass) == true }
+                                    if (qp != null && CfhState.adpQpDiag < 15) {
+                                        CfhState.adpQpDiag++
                                         Logger.d("adpQp ${m.name}(${qp.javaClass.simpleName}) ret=${m.returnType.simpleName} hit=${shouldFilterFeed(qp)} cap=${CfhUtil.readCaption(qp)?.take(20)}")
                                     }
                                 } catch (_: Throwable) {}
@@ -2985,8 +2870,6 @@ object ContentFilterHook {
         }
     }
 
-    private var adpSelfDumped = false
-    private var adpGetSwapIn = false
     // findCleanPos / adapterMainList（互相引用的死代码对）已删除：grep 证实零外部调用
 
     private fun dumpAdapterSelf(adp: Any?) {
@@ -3008,7 +2891,7 @@ object ContentFilterHook {
                 c = c.superclass; lvl++
             }
             Logger.d("adpSelf ${adp.javaClass.name}: $sb")
-            adpRef = adp
+            CfhState.adpRef = adp
             var c2: Class<*>? = adp.javaClass
             var lvl2 = 0
             while (c2 != null && c2 != Any::class.java && lvl2 < 4) {
@@ -3022,8 +2905,8 @@ object ContentFilterHook {
                             val hits = v.filter { it != null && findQpInObject(it)?.let { q -> shouldFilterFeed(q) } == true }.size
                             Logger.d("adpSelfList ${f.name} size=${v.size} elem=${v[0]?.javaClass?.name} qpFound=${qp != null} hits=$hits")
                             fixAdapterSelfAlways(adp)
-                            if (f.name == "M" && !elemDumped) {
-                                elemDumped = true
+                            if (f.name == "M" && !CfhState.elemDumped) {
+                                CfhState.elemDumped = true
                                 val e0 = v[0]
                                 if (e0 != null) {
                                     val esb = StringBuilder()
@@ -3127,18 +3010,17 @@ object ContentFilterHook {
     // ★ Method 查找缓存：rebind/jumpNext/frag 替换/refresh 命中路径的
     // getDeclaredMethod 每次全类方法表查找+复制，缓存后 O(1)；查不到不缓存
     //（方法缺失说明类结构变化，自然重查）
-    private val methodCache = java.util.concurrent.ConcurrentHashMap<String, java.lang.reflect.Method>()
     private fun cachedMethod(cls: Class<*>, name: String, vararg pt: Class<*>): java.lang.reflect.Method? {
         val key = cls.name + "#" + name + "#" + pt.size + "#" + pt.joinToString(",") { it.name }
-        methodCache[key]?.let { return it }
+        CfhState.methodCache[key]?.let { return it }
         val m = try { cls.getDeclaredMethod(name, *pt) } catch (_: Throwable) { null } ?: return null
         m.isAccessible = true
-        methodCache[key] = m
+        CfhState.methodCache[key] = m
         return m
     }
 
     private fun findQpInObject(obj: Any, depth: Int = 0): Any? {
-        val qpClass = qpClassRef ?: return null
+        val qpClass = CfhState.qpClassRef ?: return null
         if (qpClass.isInstance(obj)) return obj
         if (depth >= 2) return null
 
@@ -3173,7 +3055,6 @@ object ContentFilterHook {
 
     // ★★ holder 全图 BFS：找类名明确含 Live（直播实体/直播Fragment/直播卡容器）的脏对象。
     // 用于 QPhoto 提不到、页面 Fragment 又不是 Live 类型的场景（直播广告卡渲染在 NasaPhotoDetailFragment 里）。
-    private val dirtyEntSeen = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private fun findDirtyEntityInHolder(holder: Any, depth: Int = 0): Any? {
         if (depth >= 5) return null
         val name = holder.javaClass.name
@@ -3183,7 +3064,7 @@ object ContentFilterHook {
             // 同名类第一张脏卡 return 后，后续同类脏卡 add 失败落入字段扫描大概率
             // 返回 null → 第二张起全部漏拦上屏。add 结果只用于节流打日志
             if (holder is Collection<*>) { /* 集合本身不判脏，看元素 */ } else {
-                if (dirtyEntSeen.add(name)) Logger.d("dirtyEnt hit: $name")
+                if (CfhState.dirtyEntSeen.add(name)) Logger.d("dirtyEnt hit: $name")
                 return holder
             }
         }
@@ -3211,7 +3092,7 @@ object ContentFilterHook {
                         continue
                     }
                     if ((vn.contains("Live") || vn.contains("Ad")) && !vn.contains("ViewModel") && !vn.contains("LiveData")) {
-                        if (dirtyEntSeen.add(vn)) Logger.d("dirtyEnt hit: $vn")
+                        if (CfhState.dirtyEntSeen.add(vn)) Logger.d("dirtyEnt hit: $vn")
                         return v
                     }
                     val r = findDirtyEntityInHolder(v, depth + 1)
@@ -3224,9 +3105,9 @@ object ContentFilterHook {
     }
 
     private fun hookDataSource(c: Class<*>) {
-        val xp = xpRef ?: return
-        synchronized(hookedDsClasses) {
-            if (!hookedDsClasses.add(CfhUtil.hookKey(c))) return
+        val xp = CfhState.xpRef ?: return
+        synchronized(CfhState.hookedDsClasses) {
+            if (!CfhState.hookedDsClasses.add(CfhUtil.hookKey(c))) return
         }
         Logger.d("hookDataSource: ${c.name}")
         val qpClass = try { Class.forName("com.yxcorp.gifshow.entity.QPhoto", false, c.classLoader) } catch (_: Throwable) { null }
@@ -3296,22 +3177,20 @@ object ContentFilterHook {
         Logger.d("hookDataSource done: ${c.name} batch=$batchHooked single=$singleHooked")
     }
 
-    private val hookedVmClasses = mutableSetOf<String>()
-    @Volatile private var lretDiagCount = 0
     private fun hookViewModel(vm: Any) {
-        val xp = xpRef ?: return
+        val xp = CfhState.xpRef ?: return
         val c = vm.javaClass
-        synchronized(hookedVmClasses) { if (!hookedVmClasses.add(CfhUtil.hookKey(c))) return }
+        synchronized(CfhState.hookedVmClasses) { if (!CfhState.hookedVmClasses.add(CfhUtil.hookKey(c))) return }
         val qpClass = try { Class.forName("com.yxcorp.gifshow.entity.QPhoto", false, c.classLoader) } catch (_: Throwable) { null } ?: return
         Logger.d("hookViewModel: ${c.name}")
-        qpClassRef = qpClass
-        vmRef = vm
+        CfhState.qpClassRef = qpClass
+        CfhState.vmRef = vm
         var cls: Class<*>? = c
         var lvl = 0
         while (cls != null && cls != Any::class.java && lvl < 6) {
             for (m in cls!!.declaredMethods) {
-                if (vmMethodDump < 200) {
-                    vmMethodDump++
+                if (CfhState.vmMethodDump < 200) {
+                    CfhState.vmMethodDump++
                     Logger.d("vmM ${m.name}(${m.parameterTypes.map { it.simpleName }.joinToString(",")}) -> ${m.returnType.simpleName}")
                 }
                 if (m.returnType == Void.TYPE && m.parameterTypes.size <= 2) {
@@ -3360,8 +3239,8 @@ object ContentFilterHook {
                                         Logger.d("vm lret ${m.name} filtered: $before -> ${r.size}")
                                         // ★ 快照诊断：若同一方法反复出现相同 before（如反复 7->2），
                                         // 说明 V0() 每次返回新建快照，删快照无效，真源在别处。
-                                        lretDiagCount++
-                                        if (lretDiagCount <= 6) {
+                                        CfhState.lretDiagCount++
+                                        if (CfhState.lretDiagCount <= 6) {
                                             val implCls = r.javaClass.name
                                             val firstEl = r.firstOrNull()
                                             Logger.always("lretDIAG ${m.name}: impl=$implCls idHc=${System.identityHashCode(r)} size=${r.size} firstEl=${firstEl?.javaClass?.name ?: "null"}")
@@ -3390,7 +3269,7 @@ object ContentFilterHook {
                                 val t1tag = chain.args.getOrNull(3) as? String ?: ""
                                 val t1qp = chain.args.getOrNull(1)
                                 val t1dirty = t1qp != null && (shouldFilterFeed(t1qp) || try { decideFeedRaw(t1qp) } catch (_: Throwable) { false })
-                                Logger.always("T1CALL idx=$t1idx tag=$t1tag dirty=$t1dirty liveTop=$liveTop qp=${t1qp?.javaClass?.simpleName ?: "null"}")
+                                Logger.always("T1CALL idx=$t1idx tag=$t1tag dirty=$t1dirty CfhState.liveTop=${CfhState.liveTop} qp=${t1qp?.javaClass?.simpleName ?: "null"}")
                                 if (t1dirty) {
                                     Logger.always("T1 SWALLOWED idx=$t1idx tag=$t1tag")
                                     return@intercept null
@@ -3417,7 +3296,7 @@ object ContentFilterHook {
                                     if (clsQ != null && shouldFilterFeed(clsQ)) {
                                         val clean = pickFromQueue()
                                         if (clean != null) {
-                                            if (vmGetSubCount < 20) { vmGetSubCount++; Logger.d("vm getter ${m.name} -> clean: ${CfhUtil.readCaption(clsQ)?.take(18)}") }
+                                            if (CfhState.vmGetSubCount < 20) { CfhState.vmGetSubCount++; Logger.d("vm getter ${m.name} -> clean: ${CfhUtil.readCaption(clsQ)?.take(18)}") }
                                             return@intercept clean
                                         }
                                     }
@@ -3437,8 +3316,8 @@ object ContentFilterHook {
                             } catch (_: Throwable) {}
                             val r = chain.proceed()
                             try {
-                                if (vmYDiag < 20) {
-                                    vmYDiag++
+                                if (CfhState.vmYDiag < 20) {
+                                    CfhState.vmYDiag++
                                     Logger.d("vmY ret: ${m.name} -> ${r?.javaClass?.name ?: "null"}")
                                 }
                             } catch (_: Throwable) {}
@@ -3454,42 +3333,30 @@ object ContentFilterHook {
         }
     }
 
-    private var vmYDiag = 0
-
-    private var vmListDiagDone = false
-    private var vmListElDump = 0
 
 
-    private var vmAllFieldsDumped = false
-    @Volatile private var lastViewSig = ""
+
     // ★ 时间节流：全对象图 BFS（vmDeepClean＋一层列表）开销最大，hook 触发频率
     // 远超数据更新频率，500ms 窗口内重复清洗是无用功
-    @Volatile private var lastFilterVmListsAt = 0L
-    @Volatile private var vmRefProbeDone = false
     // ★ 治本 ANR：单次全对象图清洗成本数秒（启动期全 cache miss 放大），主线程跑
     // 必卡输入（01:05 ANR trace 铁证 main Runnable at decideFeedRaw←filterVmLists）。
     // 移后台单线程：主线程 hook 只剩入队；VM 列表多为 CopyOnWriteArrayList（快照
     // 迭代器并发安全），清洗循环全有 try-catch 兜底。节流 500ms 防后台积压
-    private val cleanExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
-        Thread(r, "ManJiaoClean").apply { isDaemon = true }
-    }
     // ★ keep-latest 合并：单次全图清洗可达秒级，500ms 节流后队列仍会积压过期任务
     //（都是重复清洗同一 VM）。同一时刻只保留最新待清洗对象，跑完再取最新——
     // 队列深度从无界变为至多 2，过期货全部丢弃
-    private val pendingCleanObj = java.util.concurrent.atomic.AtomicReference<Any?>()
-    private val cleanDrainArmed = java.util.concurrent.atomic.AtomicBoolean(false)
     private fun filterVmLists(obj: Any) {
-        if (liveTop) return
+        if (CfhState.liveTop) return
         val now = System.currentTimeMillis()
-        if (now - lastFilterVmListsAt < 500) return
-        lastFilterVmListsAt = now
+        if (now - CfhState.lastFilterVmListsAt < 500) return
+        CfhState.lastFilterVmListsAt = now
         // 一次性探针：确认 vmRef 状态与真源清洗是否激活（查「大青蜜桃」在屏滞留）
-        if (!vmRefProbeDone) { vmRefProbeDone = true; Logger.always("VMPROBE filterVmLists armed: vm=${obj.javaClass.name}") }
-        pendingCleanObj.set(obj)
-        if (cleanDrainArmed.compareAndSet(false, true)) {
-            cleanExecutor.execute {
-                cleanDrainArmed.set(false)
-                val target = pendingCleanObj.getAndSet(null) ?: return@execute
+        if (!CfhState.vmRefProbeDone) { CfhState.vmRefProbeDone = true; Logger.always("VMPROBE filterVmLists armed: vm=${obj.javaClass.name}") }
+        CfhState.pendingCleanObj.set(obj)
+        if (CfhState.cleanDrainArmed.compareAndSet(false, true)) {
+            CfhState.cleanExecutor.execute {
+                CfhState.cleanDrainArmed.set(false)
+                val target = CfhState.pendingCleanObj.getAndSet(null) ?: return@execute
                 filterVmListsInner(target)
             }
         }
@@ -3497,9 +3364,9 @@ object ContentFilterHook {
     private fun filterVmListsInner(obj: Any) {
         Logger.safe("filterVmLists") {
             // 一次性全字段 dump：找 QPhoto 类型字段的真实藏身处
-            if (!vmAllFieldsDumped) {
-                vmAllFieldsDumped = true
-                val qpClass = qpClassRef
+            if (!CfhState.vmAllFieldsDumped) {
+                CfhState.vmAllFieldsDumped = true
+                val qpClass = CfhState.qpClassRef
                 val sb = StringBuilder("vmFields ${obj.javaClass.simpleName}:")
                 var c0: Class<*>? = obj.javaClass
                 var l0 = 0
@@ -3521,7 +3388,7 @@ object ContentFilterHook {
             // ★ 二层清洗：VM.l.a（u.a）类嵌套 QP/槽位列表——V0() 快照的真源，每秒随 autoSkip 清洗。
             // s0$b 是槽位包装（QP 提取需 findQpInObject）；脏项换干净缓存项，保留最后 1 项防崩。
             Logger.safe("vmDeepClean") {
-                val qpClass = qpClassRef
+                val qpClass = CfhState.qpClassRef
                 var c1: Class<*>? = obj.javaClass
                 var l1 = 0
                 while (c1 != null && c1 != Any::class.java && l1 < 5) {
@@ -3550,8 +3417,8 @@ object ContentFilterHook {
                                             val qpWrapped = firstEl != null && !qpDirect && findQpInObject(firstEl) != null
                                             val hasQp = qpDirect || qpWrapped
                                             // 一次性结构 dump（首元素字段图）
-                                            if (hasQp && vmListElDump < 3) {
-                                                vmListElDump++
+                                            if (hasQp && CfhState.vmListElDump < 3) {
+                                                CfhState.vmListElDump++
                                                 val fe = firstEl!!
                                                 val sb2 = StringBuilder("vmDeepList ${f1.name}.${f2.name} size=${v2.size} qpDirect=$qpDirect cls=${fe.javaClass.name}:")
                                                 var ec4: Class<*>? = fe.javaClass
@@ -3617,7 +3484,7 @@ object ContentFilterHook {
                                                 val sw2 = cleanDeep()
                                                 if (sw2 > 0) Logger.always("vmDeepClean $deepTag: removed $sw2 (left ${m2.size})")
                                             } else {
-                                                handler.post {
+                                                CfhState.handler.post {
                                                     try {
                                                         val sw2 = cleanDeep()
                                                         if (sw2 > 0) Logger.always("vmDeepClean-main $deepTag: removed $sw2 (left ${m2.size})")
@@ -3644,8 +3511,8 @@ object ContentFilterHook {
                         f.isAccessible = true
                         val v = f.get(obj)
                         if (v is MutableList<*> && v.isNotEmpty()) {
-                            if (!vmListDiagDone) {
-                                vmListDiagDone = true
+                            if (!CfhState.vmListDiagDone) {
+                                CfhState.vmListDiagDone = true
                                 val e0 = v[0]
                                 Logger.d("vmListDiag ${f.name}: size=${v.size} elem=${e0?.javaClass?.name} qpIn=${e0?.let { findQpInObject(it) != null }}")
                                 if (e0 != null) {
@@ -3689,8 +3556,8 @@ object ContentFilterHook {
                                 // 用 findDirtyEntityInHolder 深度 BFS 找 Live/Ad 实体判定
                                 val isDirty = if (qp != null) shouldFilterContent(qp)
                                     else findDirtyEntityInHolder(el) != null
-                                if (qp == null && !isDirty && vmListElDump < 3) {
-                                    vmListElDump++
+                                if (qp == null && !isDirty && CfhState.vmListElDump < 3) {
+                                    CfhState.vmListElDump++
                                     val sb = StringBuilder("vmElDump ${f.name}[$idx] cls=${el.javaClass.name}:")
                                     var ec2: Class<*>? = el.javaClass
                                     var l2 = 0
@@ -3721,7 +3588,7 @@ object ContentFilterHook {
                             }
                             // ★ 后台闸门：非线程安全列表（ArrayList 等）投回主线程改
                             if (CfhUtil.isBgMutationSafe(mutable) || Looper.myLooper() == Looper.getMainLooper()) cleanRun.run()
-                            else handler.post { try { cleanRun.run() } catch (_: Throwable) {} }
+                            else CfhState.handler.post { try { cleanRun.run() } catch (_: Throwable) {} }
 
                         }
                     } catch (_: Throwable) {}
@@ -3737,7 +3604,7 @@ object ContentFilterHook {
     // 链上任一点直接命中 QP 即返回；到 Fragment 后再试 m.b。
     // 校验 b 值非集合/View，防误下钻
     private fun findSlotQpViaMb(el: Any): Any? {
-        val qpClass = qpClassRef ?: return null
+        val qpClass = CfhState.qpClassRef ?: return null
         try {
             var cur: Any = el
             for (hop in 0 until 5) {
@@ -3757,7 +3624,7 @@ object ContentFilterHook {
 
 
     private fun filterListArgs(args: List<Any?>): Int {
-        if (liveTop) return 0
+        if (CfhState.liveTop) return 0
         var removed = 0
         for (a in args) {
             if (a is MutableList<*>) {
@@ -3796,8 +3663,8 @@ object ContentFilterHook {
                         removed += deleted
                         Logger.d("feed filtered del=$deleted left=${a.size} first: ${cap0?.take(30)}")
                         // 调用链取证（限流）：直播卡片「先渲染后删除」漏拦路径定位用
-                        if (!Logger.quiet && fltCallerDiag < 20) {
-                            fltCallerDiag++
+                        if (!Logger.quiet && CfhState.fltCallerDiag < 20) {
+                            CfhState.fltCallerDiag++
                             Logger.d("fltCaller: " + Thread.currentThread().stackTrace.drop(2).take(8)
                                 .joinToString(" <- ") { it.className.substringAfterLast('.') + "." + it.methodName })
                         }
@@ -3821,31 +3688,28 @@ object ContentFilterHook {
     }
 
 
-    private var filterResultDiag = 0
-    private var fltCallerDiag = 0
     // ★ 时间节流：V0() 等 getter 每次返回重建的快照列表，副本删了真源不动，
     // 每次进来都重扫重删（实证 1.45s 15 次 sanitize ret）＝纯无用功＋分配风暴。
     // 数据更新频率低，脏项最长存活 200ms 可接受
     // ★ 节流按列表身份（审阅 2026-09）：原全进程单一时间戳使同一 200ms 窗口内到达
     // 的其它列表/快照（V0 每次 getter 重建、rerank、ds.ret、cache 多路共用本函数）
     // 完全不滤，脏项存活窗口远超预期
-    private val retThrottle = java.util.concurrent.ConcurrentHashMap<Int, Long>()
     private fun filterResult(result: Any?): Int {
         if (result !is MutableList<*>) return 0
         val now = System.currentTimeMillis()
         val key = System.identityHashCode(result)
-        val last = retThrottle[key]
+        val last = CfhState.retThrottle[key]
         if (last != null && now - last < 200) return 0
-        retThrottle[key] = now
-        if (retThrottle.size > 64) retThrottle.clear()
+        CfhState.retThrottle[key] = now
+        if (CfhState.retThrottle.size > 64) CfhState.retThrottle.clear()
         if (result.isNotEmpty()) {
-            filterResultDiag++
-            if (filterResultDiag <= 10 || filterResultDiag % 100 == 0) {
+            CfhState.filterResultDiag++
+            if (CfhState.filterResultDiag <= 10 || CfhState.filterResultDiag % 100 == 0) {
                 val elem = result[0]
                 val elemCls = elem?.javaClass?.name ?: "null"
                 val ent = elem?.let { Reflect.readAny(it, "mEntity") }
                 val entCls = ent?.javaClass?.name ?: "null"
-                Logger.d("filterResult diag #$filterResultDiag: size=${result.size} elemCls=$elemCls entCls=$entCls")
+                Logger.d("filterResult diag #${CfhState.filterResultDiag}: size=${result.size} elemCls=$elemCls entCls=$entCls")
             }
         }
         val hits = result.filter { it != null && (try { shouldFilterFeed(it) } catch (_: Throwable) { false }) }
@@ -3853,10 +3717,10 @@ object ContentFilterHook {
         val cap0 = CfhUtil.readCaption(hits.first())
         // 记录快照删掉的脏元素（身份反查真源字段用）
         try {
-            synchronized(retDelQp) {
-                retDelQp.clear()
-                for (h in hits) retDelQp.add(h)
-                if (retDelQp.size > 24) retDelQp.subList(0, retDelQp.size - 24).clear()
+            synchronized(CfhState.retDelQp) {
+                CfhState.retDelQp.clear()
+                for (h in hits) CfhState.retDelQp.add(h)
+                if (CfhState.retDelQp.size > 24) CfhState.retDelQp.subList(0, CfhState.retDelQp.size - 24).clear()
             }
         } catch (_: Throwable) {}
         @Suppress("UNCHECKED_CAST")
@@ -3865,7 +3729,7 @@ object ContentFilterHook {
         // ★ 真源清洗补链：ret 是 V0() 重建的快照副本，删了真源不动（实证「大青蜜桃」直播
         // 卡 ret 删 190 轮仍在屏）。快照删到脏项=真源必有对应脏对象，此处补调 filterVmLists
         // （500ms 节流+后台线程+Presenter/Callback 守卫齐全），vmRef 已建立时同步清真源
-        if (vmRef != null) { try { filterVmLists(vmRef!!) } catch (_: Throwable) {} }
+        if (CfhState.vmRef != null) { try { filterVmLists(CfhState.vmRef!!) } catch (_: Throwable) {} }
         // 幸存者入�?
         try {
             for (el in result) el?.let { e -> findQpInObject(e)?.let { q -> if (!shouldFilterFeed(q)) offerClean(q) } }
@@ -3875,18 +3739,14 @@ object ContentFilterHook {
         return hits.size
     }
 
-    private var lastRefreshTime = 0L
-    private var lastAllDirtyRefreshAt = 0L
 
-    private var respFieldDiag = 0
-    private var respFieldCallDiag = 0
     private fun filterResponseFields(obj: Any) {
         if (obj == null) {
-            if (respFieldCallDiag < 8) { respFieldCallDiag++; Logger.d("respFieldCall obj=NULL") }
+            if (CfhState.respFieldCallDiag < 8) { CfhState.respFieldCallDiag++; Logger.d("respFieldCall obj=NULL") }
             return
         }
-        if (respFieldCallDiag < 8) {
-            respFieldCallDiag++
+        if (CfhState.respFieldCallDiag < 8) {
+            CfhState.respFieldCallDiag++
             var listCount = 0
             var c0: Class<*>? = obj.javaClass
             while (c0 != null && c0 != Any::class.java) {
@@ -3909,8 +3769,8 @@ object ContentFilterHook {
                     // 只要能抽�?QPhoto 就视�?feed 列表（含 wrapper 包装�?
                     val isFeed = e0 != null && (findQpInObject(e0) != null || e0.javaClass.name.contains("Feed") || e0.javaClass.name.contains("Photo"))
                     if (!isFeed) continue
-                    if (respFieldDiag < 20) {
-                        respFieldDiag++
+                    if (CfhState.respFieldDiag < 20) {
+                        CfhState.respFieldDiag++
                         Logger.d("respField see ${f.name} size=${list.size} elem0=${e0?.javaClass?.name ?: "null"}")
                     }
                     val copy = arrayListOf<Any?>()
@@ -3930,7 +3790,7 @@ object ContentFilterHook {
 
 
     private fun removeByIdentityOnMain(list: MutableList<Any?>, dirtyId: MutableSet<Any>, tag: String, allowEmpty: Boolean) {
-        handler.post {
+        CfhState.handler.post {
             try {
                 var removed = 0
                 for (i in list.indices.reversed()) {
@@ -4004,8 +3864,8 @@ object ContentFilterHook {
                         shouldFilterFeed(q)
                     } catch (_: Throwable) { false }
                 }
-                if (leftoverDirty && now - lastAllDirtyRefreshAt > 3000) {
-                    lastAllDirtyRefreshAt = now
+                if (leftoverDirty && now - CfhState.lastAllDirtyRefreshAt > 3000) {
+                    CfhState.lastAllDirtyRefreshAt = now
                     Logger.always("sanitize $tag all-dirty batch -> triggerRefresh (left ${list.size})")
                     triggerRefresh()
                 }
@@ -4022,7 +3882,6 @@ object ContentFilterHook {
     // （源码仅 hasMore||invalidate 才 R1 发请求），续拉链路会永久卡死——前置健康检查：
     // hasMore=false → 调 q1.refresh()（invalidate+重拉第一页）恢复供给；isLoading=true（请求在途）→ 跳过等回调；
     // 正常 → load() 续拉。
-    private var lastLoadMoreTime = 0L
     private fun findLoadTarget(inst: Any): Any? {
         val selfHas = try { inst.javaClass.getMethod("load"); true } catch (_: Throwable) { false }
         if (selfHas) return inst
@@ -4045,13 +3904,13 @@ object ContentFilterHook {
     private fun triggerLoadMore(): Boolean {
         // ★ 线程闸门：同 triggerRefresh，后台线程调用一律投回主线程执行
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            handler.post { try { triggerLoadMore() } catch (_: Throwable) {} }
+            CfhState.handler.post { try { triggerLoadMore() } catch (_: Throwable) {} }
             return true
         }
         val now = System.currentTimeMillis()
-        if (now - lastLoadMoreTime < 800) return false
-        val inst = knhbInst?.get()
-        if (inst == null) { Logger.d("loadMore SKIP: knhbInst=null -> fallback refresh"); return triggerRefresh() }
+        if (now - CfhState.lastLoadMoreTime < 800) return false
+        val inst = CfhState.knhbInst?.get()
+        if (inst == null) { Logger.d("loadMore SKIP: CfhState.knhbInst=null -> fallback refresh"); return triggerRefresh() }
         val target = findLoadTarget(inst)
         if (target == null) { Logger.d("loadMore no target -> fallback refresh"); return triggerRefresh() }
         val hasMore = try {
@@ -4062,7 +3921,7 @@ object ContentFilterHook {
             Logger.d("loadMore hasMore=false -> refresh recover")
             val rm = try { target.javaClass.getMethod("refresh") } catch (_: Throwable) { null }
             if (rm != null) {
-                try { rm.isAccessible = true; rm.invoke(target); lastLoadMoreTime = now; return true } catch (_: Throwable) {}
+                try { rm.isAccessible = true; rm.invoke(target); CfhState.lastLoadMoreTime = now; return true } catch (_: Throwable) {}
             }
             return triggerRefresh()
         }
@@ -4072,15 +3931,15 @@ object ContentFilterHook {
         } catch (_: Throwable) { false }
         if (isLoading) {
 
-            if (now - lastLoadMoreTime > 5000) {
+            if (now - CfhState.lastLoadMoreTime > 5000) {
 
                 Logger.always("loadMore in flight >5s -> hist reset + refresh recover")
 
-                synchronized(seenPhotoIds) { seenPhotoIds.clear() }
+                synchronized(CfhState.seenPhotoIds) { CfhState.seenPhotoIds.clear() }
 
                 val rm = try { target.javaClass.getMethod("refresh") } catch (_: Throwable) { null }
 
-                if (rm != null) { try { rm.isAccessible = true; rm.invoke(target); lastLoadMoreTime = now; return true } catch (_: Throwable) {} }
+                if (rm != null) { try { rm.isAccessible = true; rm.invoke(target); CfhState.lastLoadMoreTime = now; return true } catch (_: Throwable) {} }
 
                 return triggerRefresh()
 
@@ -4095,7 +3954,7 @@ object ContentFilterHook {
             val m = target.javaClass.getMethod("load")
             m.isAccessible = true
             m.invoke(target)
-            lastLoadMoreTime = now
+            CfhState.lastLoadMoreTime = now
             Logger.d("loadMore called on ${target.javaClass.name} (hasMore=true)")
             true
         } catch (_: Throwable) { triggerRefresh() }
@@ -4104,14 +3963,14 @@ object ContentFilterHook {
         // ★ 线程闸门（审阅 2026-09）：本方法会从 cleanExecutor 后台线程（sanitizeList
         // all-dirty 兜底、loadMore 恢复）调用，反射 invoke 宿主 VM 刷新方法必须在主线程
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            handler.post { try { triggerRefresh() } catch (_: Throwable) {} }
+            CfhState.handler.post { try { triggerRefresh() } catch (_: Throwable) {} }
             return true
         }
         val now = System.currentTimeMillis()
-        if (now - lastRefreshTime < 800) return false
-        lastRefreshTime = now
-        val vm = vmRef
-        if (vm == null) { Logger.always("refresh SKIP: vmRef=null (VM not found yet)"); return false }
+        if (now - CfhState.lastRefreshTime < 800) return false
+        CfhState.lastRefreshTime = now
+        val vm = CfhState.vmRef
+        if (vm == null) { Logger.always("refresh SKIP: CfhState.vmRef=null (VM not found yet)"); return false }
         for (name in arrayOf("v0", "B1", "C1", "E1", "K1", "W0", "X0", "Y0", "z0", "y0", "refresh", "loadMore")) {
             val m = cachedMethod(vm.javaClass, name) ?: continue
             try {
@@ -4141,11 +4000,10 @@ object ContentFilterHook {
         return false
     }
 
-    private var adpListDumped = false
     private fun dumpAdapterLists(adp: Any) {
-        if (adpListDumped) return
-        adpListDumped = true
-        val qpClass = qpClassRef
+        if (CfhState.adpListDumped) return
+        CfhState.adpListDumped = true
+        val qpClass = CfhState.qpClassRef
         fun scan(obj: Any, prefix: String, depth: Int, seen: MutableSet<Int>) {
             if (depth > 2) return
             if (!seen.add(System.identityHashCode(obj))) return
@@ -4170,67 +4028,50 @@ object ContentFilterHook {
             }
         }
         scan(adp, "", 0, mutableSetOf())
-        vmRef?.let { scan(it, "VM>", 0, mutableSetOf()) }
+        CfhState.vmRef?.let { scan(it, "VM>", 0, mutableSetOf()) }
     }
 
 
-    private var feedDiagCount = 0
-    private var lastFeedDiagSig = ""
-    @Volatile private var lastFeedDiagAt = 0L
-    private var nonVfDiagCount = 0
-    private var weakUnwrapDiag = 0
-    private var liveDiagCount = 0
-    private var movieDiagCount = 0
-    private var entFullDumpCount = 0
-    private var entScanDiag = 0
-    private var entFullProbeCount = 0
-    private var liveFieldDiag = 0
     // 过滤总开关缓存（2 秒 TTL）：所有过滤开关全关时 shouldFilterFeed 零反射直接返回，
     // 避免每次 feed 加载都白跑一遍 mEntity 反射链（全关时卡顿的主源）
-    private var anyOnCache = false
-    private var anyOnAt = 0L
     private fun anyFilterOn(): Boolean {
         val now = System.currentTimeMillis()
-        if (now - anyOnAt > 2000) {
-            anyOnAt = now
-            anyOnCache = Prefs.bool(Prefs.K_FLT_ADS, false) || Prefs.bool(Prefs.K_FLT_ADVIDEO, false) ||
+        if (now - CfhState.anyOnAt > 2000) {
+            CfhState.anyOnAt = now
+            CfhState.anyOnCache = Prefs.bool(Prefs.K_FLT_ADS, false) || Prefs.bool(Prefs.K_FLT_ADVIDEO, false) ||
                 Prefs.bool(Prefs.K_FLT_IMAGE, false) || Prefs.bool(Prefs.K_FLT_LIVE, false) ||
                 Prefs.bool(Prefs.K_FLT_AI, false) || Prefs.bool(Prefs.K_FLT_EC, false) ||
                 Prefs.bool(Prefs.K_FLT_DRAMA, false) || Prefs.bool(Prefs.K_FLT_LIKE_ON, false) ||
                 Prefs.bool(Prefs.K_FLT_KW_ON, false)
         }
-        return anyOnCache
+        return CfhState.anyOnCache
     }
 
     // ★ 性能优化-判定缓存：同一 QPhoto 在列表/窗口/adapter 多条链路被重复判定几十上百次，
     // 每次全量反射 20+ 字段。WeakHashMap 按对象身份缓存判定结果，配置变化时失效。
-    private val sigIdCache = java.util.concurrent.ConcurrentHashMap<Int, Boolean>()
-    private val feedFilterCache = java.util.Collections.synchronizedMap(java.util.WeakHashMap<Any, Boolean>())
-    private val contentFilterCache = java.util.Collections.synchronizedMap(java.util.WeakHashMap<Any, Boolean>())
-    private var fcacheDiag = 0
     fun invalidateFilterCache() {
-        feedFilterCache.clear()
-        contentFilterCache.clear()
+        CfhState.feedFilterCache.clear()
+        CfhState.contentFilterCache.clear()
         // ★ 配置变化必须连带清签名缓存：此前只清 identity 弱缓存，sig 缓存里
         // 旧开关组合的判定结果残留（如 AI 开着时的 true），用户关开关后旧项
         // 仍被过滤直到缓存超限 clear——开关「关不掉」的根因之一
-        feedSigCache.clear()
-        contentSigCache.clear()
-        sigIdCache.clear()
-        asyncDecidePending.clear()
+        CfhState.feedSigCache.clear()
+        CfhState.contentSigCache.clear()
+        CfhState.sigIdCache.clear()
+        CfhState.asyncDecidePending.clear()
     }
     fun refreshContent(): Boolean {
-        synchronized(seenPhotoIds) { seenPhotoIds.clear() }
+        synchronized(CfhState.seenPhotoIds) { CfhState.seenPhotoIds.clear() }
         Logger.always("refreshContent: hist cleared")
-        val inst = knhbInst?.get()
-        if (inst == null) { Logger.always("refreshContent: knhbInst=null, fallback loadMore"); return triggerLoadMore() }
+        val inst = CfhState.knhbInst?.get()
+        if (inst == null) { Logger.always("refreshContent: CfhState.knhbInst=null, fallback loadMore"); return triggerLoadMore() }
         val target = findLoadTarget(inst)
         if (target == null) { Logger.always("refreshContent: no target, fallback loadMore"); return triggerLoadMore() }
         val rm = try { target.javaClass.getMethod("refresh") } catch (_: Throwable) { null }
         if (rm != null) {
             try {
                 rm.isAccessible = true; rm.invoke(target)
-                lastLoadMoreTime = System.currentTimeMillis()
+                CfhState.lastLoadMoreTime = System.currentTimeMillis()
                 Logger.always("refreshContent: refresh() called on " + target.javaClass.name)
                 return true
             } catch (e: Throwable) { Logger.always("refreshContent: refresh() threw " + e.javaClass.name) }
@@ -4243,7 +4084,7 @@ object ContentFilterHook {
         if (cache.size > 3000) cache.clear()
         val hit = cache[qp]
         if (hit != null) {
-            if (fcacheDiag < 5) { fcacheDiag++; Logger.d("fcache hit (${cache.size})") }
+            if (CfhState.fcacheDiag < 5) { CfhState.fcacheDiag++; Logger.d("fcache hit (${cache.size})") }
             return hit
         }
         val r = decide()
@@ -4252,21 +4093,17 @@ object ContentFilterHook {
     }
 
     // ★ 误伤审计：命中分支记录原因+文案样本；每 60 次汇总一次各规则拦截量
-    private val filterHitStats = java.util.concurrent.ConcurrentHashMap<String, Int>()
-    private var hitLogDiag = 0
-    private var quickDebugCount = 0
-    private var hitTotal = 0
     private fun hit(reason: String, qp: Any) {
         try {
-            filterHitStats.merge(reason, 1, Int::plus)
-            hitTotal++
-            if (hitLogDiag < 60) {
-                hitLogDiag++
+            CfhState.filterHitStats.merge(reason, 1, Int::plus)
+            CfhState.hitTotal++
+            if (CfhState.hitLogDiag < 60) {
+                CfhState.hitLogDiag++
                 val un = try { CfhUtil.readUserName(qp, Reflect.readAny(qp, "mEntity") ?: qp) } catch (_: Throwable) { "" }
                 Logger.d("fltHit [$reason] user=$un cap=${CfhUtil.readCaption(qp)?.take(28)}")
             }
-            if (hitTotal % 60 == 0) {
-                Logger.d("fltHitStats total=$hitTotal " + filterHitStats.entries.sortedByDescending { it.value }.joinToString(",") { "${it.key}=${it.value}" })
+            if (CfhState.hitTotal % 60 == 0) {
+                Logger.d("fltHitStats total=${CfhState.hitTotal} " + CfhState.filterHitStats.entries.sortedByDescending { it.value }.joinToString(",") { "${it.key}=${it.value}" })
             }
         } catch (_: Throwable) {}
     }
@@ -4274,22 +4111,19 @@ object ContentFilterHook {
     // ★ 内容签名缓存：V0 等 getter 每次返回重建的包装对象（identity 变化致 cachedDecide
     // 的 identity 缓存全 miss，实证 96 万次全量判定/CPU 113% 风暴）。同一视频快照重建但
     // 内容不变 → 按内容签名（实体类|文案|点赞数）命中，全量判定每条视频只跑一次
-    private val feedSigCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
-    private val contentSigCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
 
     // ★ 治本 ANR 第二步：主线程零重判定。decideFeedRaw 全量判定（20+ 反射读）启动期
     // cache 全 miss 时主线程连跑 N 次=01:05 ANR 铁证。改为：sig 命中直接用；miss 时
     // 主线程只提 sig（4 次 Field 缓存反射，微秒级）＋入后台队列先放行（false）；
     // 后台算完写 sig 缓存，由高频触发的 getter/响应 hook 下一拍补剔。脏项最长存活
     // 一小拍（后台判定 ms 级+补剔频繁），换来主线程零阻塞
-    private val asyncDecidePending = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
     // ★ 主线程微秒级官方标记快判：decideBySig miss 时先跑此函数，命中官方标记即拦，
     // 未命中才入后台全量判定。修复 ANR 修复引入的首见漏一拍回归（AI/广告/短剧）
     private fun quickOfficialDirty(qp: Any): Boolean {
         // ★ 裸实体兜底：LiveStreamFeed 直接作列表元素时无 mEntity 字段（实测 03:45 24批次
         // 全放行直通上屏），ent 取 qp 自身让 live:entCls 类名判定照常工作
         val ent = Reflect.readAny(qp, "mEntity") ?: qp
-        if (quickDebugCount < 10) { quickDebugCount++; val aiOn = Prefs.bool(Prefs.K_FLT_AI, false); val pm = Reflect.readAny(ent, "mPhotoMeta"); val dis = try { Reflect.readAny(pm, "mDisclaimergeMessageV2") } catch (_: Throwable) { null }; val disC = if (dis != null) try { Reflect.readAny(dis, "content") as? String } catch (_: Throwable) { null } else null; Logger.d("QDBG aiOn=$aiOn hasDis=${dis != null} disC=$disC") }
+        if (CfhState.quickDebugCount < 10) { CfhState.quickDebugCount++; val aiOn = Prefs.bool(Prefs.K_FLT_AI, false); val pm = Reflect.readAny(ent, "mPhotoMeta"); val dis = try { Reflect.readAny(pm, "mDisclaimergeMessageV2") } catch (_: Throwable) { null }; val disC = if (dis != null) try { Reflect.readAny(dis, "content") as? String } catch (_: Throwable) { null } else null; Logger.d("QDBG aiOn=$aiOn hasDis=${dis != null} disC=$disC") }
         // ★ 直播：ent 类名含 Live 即拦（纯类名检查微秒级，与 advideo:mAd 同级）。
         // 实证 02:36 LADUMP {LiveStreamFeed=3} 批次 del 只带走 AI/广告、3 条直播全部放行
         // ——直播此前不在 quick 路径，后台补剔又晚于 pager 构造，致精选tab直播上屏
@@ -4310,7 +4144,7 @@ object ContentFilterHook {
             val cap = cm?.let { Reflect.readString(it, "mCaption") } ?: ""
             if (cap.contains("ai生成", true) || cap.contains("AI创作") || cap.contains("疑似") || cap.contains("AIGC") || cap.contains("人工智能")) { hit("ai:capText", qp); return true }
         } else {
-            if (quickDebugCount < 10) { quickDebugCount++; Logger.d("QDBG aiOff pm.hasDis=${try { Reflect.readAny(Reflect.readAny(ent, "mPhotoMeta"), "mDisclaimergeMessageV2") != null } catch (_: Throwable) { false }}") }
+            if (CfhState.quickDebugCount < 10) { CfhState.quickDebugCount++; Logger.d("QDBG aiOff pm.hasDis=${try { Reflect.readAny(Reflect.readAny(ent, "mPhotoMeta"), "mDisclaimergeMessageV2") != null } catch (_: Throwable) { false }}") }
         }
         if (Prefs.bool(Prefs.K_FLT_DRAMA, true)) {
             if (Reflect.readAny(ent, "mKwAppNativeDrama") != null) { hit("drama:kwApp", qp); return true }
@@ -4324,8 +4158,8 @@ object ContentFilterHook {
         // ★ sigIdCache 以 System.identityHashCode 为键：GC 后 hash 可被新对象复用，
         // 无限增长的旧条目既泄漏内存又可能串判（新对象命中旧 hash 的结果）。
         // 定期清空 + 清 sig 缓存时连带清，代价只是一次重判定
-        if (sigIdCache.size > 8000) sigIdCache.clear()
-        sigIdCache[System.identityHashCode(qp)]?.let { return it }
+        if (CfhState.sigIdCache.size > 8000) CfhState.sigIdCache.clear()
+        CfhState.sigIdCache[System.identityHashCode(qp)]?.let { return it }
         val sig = try {
             val ent = Reflect.readAny(qp, "mEntity")
             val pm = ent?.let { Reflect.readAny(it, "mPhotoMeta") }
@@ -4339,22 +4173,22 @@ object ContentFilterHook {
                 (readPhotoId(qp) ?: "")
         } catch (_: Throwable) { null }
         if (sig != null) {
-            cache[sig]?.let { sigIdCache[System.identityHashCode(qp)] = it; return it }
-            if (cache.size > 3000) { cache.clear(); sigIdCache.clear() }
+            cache[sig]?.let { CfhState.sigIdCache[System.identityHashCode(qp)] = it; return it }
+            if (cache.size > 3000) { cache.clear(); CfhState.sigIdCache.clear() }
             // miss：主线程先跑 quickOfficialDirty（微秒级官方标记），命中即拦；
             // 未命中入后台线程跑全量判定，先放行
             if (quickOfficialDirty(qp)) {
                 cache[sig] = true
                 return true
             }
-            if (asyncDecidePending.add(sig)) {
-                cleanExecutor.execute {
+            if (CfhState.asyncDecidePending.add(sig)) {
+                CfhState.cleanExecutor.execute {
                     try {
                         val r = decide()
                         cache[sig] = r
-                        sigIdCache[System.identityHashCode(qp)] = r
-                        asyncDecidePending.remove(sig)
-                    } catch (_: Throwable) { asyncDecidePending.remove(sig) }
+                        CfhState.sigIdCache[System.identityHashCode(qp)] = r
+                        CfhState.asyncDecidePending.remove(sig)
+                    } catch (_: Throwable) { CfhState.asyncDecidePending.remove(sig) }
                 }
             }
             return false
@@ -4363,38 +4197,38 @@ object ContentFilterHook {
     }
 
     private fun shouldFilterFeed(qp: Any): Boolean {
-        if (liveTop) return false
+        if (CfhState.liveTop) return false
         if (!anyFilterOn()) return false
         // ★ 解包 WeakReference：精选 tab 列表元素是 WeakReference 包装（实证 r15d #9 elemCls=WeakReference entCls=null），
         // WeakReference 没 mEntity 字段 → ent=qp 自身 → entCls=WeakReference 不含 Live → 漏判。先 .get() 解包再判定
         val realQp = if (qp.javaClass.name == "java.lang.ref.WeakReference") {
             val inner = try { (qp as java.lang.ref.WeakReference<*>).get() } catch (_: Throwable) { null }
             if (inner == null) return false
-            if (weakUnwrapDiag < 30) { weakUnwrapDiag++; Logger.d("weakUnwrap: ${inner.javaClass.name}") }
+            if (CfhState.weakUnwrapDiag < 30) { CfhState.weakUnwrapDiag++; Logger.d("weakUnwrap: ${inner.javaClass.name}") }
             // 解包后若非 QPhoto（如 HomeFeaturedMilanoContainerFragment 容器），从内部找 QPhoto 再判定
-            val qpClass = qpClassRef
+            val qpClass = CfhState.qpClassRef
             if (qpClass != null && !qpClass.isAssignableFrom(inner.javaClass)) {
                 findQpInObject(inner) ?: inner
             } else inner
         } else qp
-        return decideBySig(feedSigCache, realQp) { cachedDecide(feedFilterCache, realQp) { decideFeedRaw(realQp) } }
+        return decideBySig(CfhState.feedSigCache, realQp) { cachedDecide(CfhState.feedFilterCache, realQp) { decideFeedRaw(realQp) } }
     }
     private fun decideFeedRaw(qp: Any): Boolean {
         // ★ 裸实体兜底：同 quickOfficialDirty，无 mEntity 时判 qp 自身类名
         val ent = Reflect.readAny(qp, "mEntity") ?: qp
         val entCls = ent.javaClass.name
         if (!entCls.contains("feed.VideoFeed")) {
-            if (nonVfDiagCount < 20 || nonVfDiagCount % 100 == 0) {
-                nonVfDiagCount++
+            if (CfhState.nonVfDiagCount < 20 || CfhState.nonVfDiagCount % 100 == 0) {
+                CfhState.nonVfDiagCount++
                 Logger.d("nonVF ent: $entCls")
-            } else nonVfDiagCount++
+            } else CfhState.nonVfDiagCount++
             if (Prefs.bool(Prefs.K_FLT_LIVE, false) && !isStructClsName(entCls) && entCls.contains("Live", true)) {
-                liveDiagCount++
+                CfhState.liveDiagCount++
                 // 抓栈是高成本操作（填栈+分配），quiet 时不做
-                if (!Logger.quiet && liveDiagCount % 100 == 1) {
-                    Logger.d("live stack #${liveDiagCount}:\n" + Thread.currentThread().stackTrace.drop(1).take(16).joinToString("\n"))
+                if (!Logger.quiet && CfhState.liveDiagCount % 100 == 1) {
+                    Logger.d("live stack #${CfhState.liveDiagCount}:\n" + Thread.currentThread().stackTrace.drop(1).take(16).joinToString("\n"))
                 }
-                if (liveDiagCount <= 3 || liveDiagCount % 100 == 0) Logger.d("live feed hit: cls=$entCls")
+                if (CfhState.liveDiagCount <= 3 || CfhState.liveDiagCount % 100 == 0) Logger.d("live feed hit: cls=$entCls")
                 try { ensureLiveFeedConstructHooked(ent) } catch (_: Throwable) {}
                 return true
             }
@@ -4403,7 +4237,7 @@ object ContentFilterHook {
             if (Prefs.bool(Prefs.K_FLT_LIVE, false)) {
                 val capx = (CfhUtil.readCaption(qp) ?: Reflect.readString(ent, "mCaption"))?.take(60) ?: ""
                 if (entCls.contains("AdNovel") || entCls.contains("NovelVideo") || entCls.contains("GameAd")) {
-                    if (liveDiagCount % 100 == 0) Logger.d("live game-ad hit: cls=$entCls cap=${capx.take(16)}")
+                    if (CfhState.liveDiagCount % 100 == 0) Logger.d("live game-ad hit: cls=$entCls cap=${capx.take(16)}")
                     return true
                 }
                 val unx = CfhUtil.readUserName(qp, ent)
@@ -4418,8 +4252,8 @@ object ContentFilterHook {
         val cap = cm?.let { Reflect.readString(it, "mCaption") } ?: ""
         // ★★★ 视频作者直播浮窗：普通 VideoFeed 里驱动 "直播中/进入直播间/直播小窗" 的字段
         // （欠编译版本 mCurrentLivingState 仅是其一；这里全量找 live 相关字段名）
-        if (liveFieldDiag < 6) {
-            liveFieldDiag++
+        if (CfhState.liveFieldDiag < 6) {
+            CfhState.liveFieldDiag++
             val hits = mutableListOf<String>()
             fun scanForLive(obj: Any, prefix: String) {
                 var c: Class<*>? = obj.javaClass
@@ -4445,18 +4279,18 @@ object ContentFilterHook {
             scanForLive(qp, "qp ")
             if (hits.isNotEmpty()) Logger.d("LIVEFIELD $hits cap=${cap.take(16)}")
         }
-        feedDiagCount++
+        CfhState.feedDiagCount++
         // ★ 性能：整段诊断反射（20+ 次）只为拼日志，quiet 时全跳过；但
         // lastViewQp 换条更新是 AIFULL 兜底锚点，quiet 时也必须维护
         val un = CfhUtil.readUserName(qp, ent)
         val like = pm?.let { Reflect.readLong(it, "mLikeCount") } ?: -1L
         val sig = cap.take(22) + "|" + like + "|" + un
-        if (sig != lastViewSig) { lastViewSig = sig; lastViewQp = qp }
+        if (sig != CfhState.lastViewSig) { CfhState.lastViewSig = sig; CfhState.lastViewQp = qp }
         // ★ 诊断限流（S2 2026-09）：重反射诊断块只随独立 diag 开关开——与 quiet 解耦，
         // 排障开诊断不再拖垮性能；每秒最多 1 次全量诊断
-        if (Logger.diag && (feedDiagCount <= 10 || (sig != lastFeedDiagSig && System.currentTimeMillis() - lastFeedDiagAt > 1000))) {
-            lastFeedDiagAt = System.currentTimeMillis()
-            lastFeedDiagSig = sig
+        if (Logger.diag && (CfhState.feedDiagCount <= 10 || (sig != CfhState.lastFeedDiagSig && System.currentTimeMillis() - CfhState.lastFeedDiagAt > 1000))) {
+            CfhState.lastFeedDiagAt = System.currentTimeMillis()
+            CfhState.lastFeedDiagSig = sig
             val cmt = pm?.let { Reflect.readLong(it, "mCommentCount") } ?: -1L
             val liveMeta = Reflect.readAny(ent, "mLivePlaybackMeta")
             val liveSid = liveMeta?.let { Reflect.readAny(it, "mLiveStreamId") }
@@ -4480,16 +4314,16 @@ object ContentFilterHook {
             val cardPlay = cor?.let { Reflect.readInt(it, "mCardPlayType") } ?: -1
             // 审计：全特征（含作者名/类名/mAd），换条才打，便于抓漏网广告
             val mAdAny = Reflect.readAny(ent, "mAd")
-            if (sig != lastViewSig || lastViewQp === qp) {
+            if (sig != CfhState.lastViewSig || CfhState.lastViewQp === qp) {
                 Logger.d("VIEWDIAG like=$like cmt=$cmt user=\"$un\" ent=${ent.javaClass.simpleName} ad=${mAdAny != null} aiFields=" + dumpAiFields(qp, ent, cm) + " liveSid=${liveSid != null} d1=${drama1 != null} capLen=${cap.length} cap=\"${cap.take(80)}\"")
             }
-            Logger.d("feed diag #$feedDiagCount like=$like liveSid=${liveSid != null} d1=${drama1 != null} d2=${drama2 != null} d3=${drama3 != null} tubeInfo=${tubeInfo != null} tubeTag=$tubeTag longVid=$longVid pmCls=$pmCls entType=$entType entDisp=$entDisp qpType=$qpType cmType=$cmType pmType=$pmType cardStyle=$cardStyle cardPlay=$cardPlay cap=${cap.take(18)}")
-            if (entFullProbeCount < 2) { entFullProbeCount++; Logger.always("ENTPROBE hit: quiet=${Logger.quiet} longVid=$longVid d1=${drama1 != null} tube=${tube != null}") }
+            Logger.d("feed diag #${CfhState.feedDiagCount} like=$like liveSid=${liveSid != null} d1=${drama1 != null} d2=${drama2 != null} d3=${drama3 != null} tubeInfo=${tubeInfo != null} tubeTag=$tubeTag longVid=$longVid pmCls=$pmCls entType=$entType entDisp=$entDisp qpType=$qpType cmType=$cmType pmType=$pmType cardStyle=$cardStyle cardPlay=$cardPlay cap=${cap.take(18)}")
+            if (CfhState.entFullProbeCount < 2) { CfhState.entFullProbeCount++; Logger.always("ENTPROBE hit: quiet=${Logger.quiet} longVid=$longVid d1=${drama1 != null} tube=${tube != null}") }
             // ★ ENTFULL 一次性诊断：长视频且 drama 三字段全空的样本（如电视剧剪辑
             // 「从海底出击」）。实证 tubeTag=false 打印值证明 mTubeModel 非空——
             // dump ent + tube 两层全字段找真正的 TV/剧集结构化标记来源
-            if (entFullDumpCount < 3 && longVid == true && drama1 == null && drama2 == null && drama3 == null) {
-                entFullDumpCount++
+            if (CfhState.entFullDumpCount < 3 && longVid == true && drama1 == null && drama2 == null && drama3 == null) {
+                CfhState.entFullDumpCount++
                 fun dumpAll(o: Any, prefix: String, sb: StringBuilder) {
                     var cf: Class<*>? = o.javaClass
                     var lf = 0
@@ -4511,7 +4345,7 @@ object ContentFilterHook {
                         val sup = cf!!.superclass; cf = sup; lf++
                     }
                 }
-                val sb = StringBuilder("ENTFULL #$entFullDumpCount like=$like cap=\"${cap.take(12)}\" ${ent.javaClass.name}:")
+                val sb = StringBuilder("ENTFULL #${CfhState.entFullDumpCount} like=$like cap=\"${cap.take(12)}\" ${ent.javaClass.name}:")
                 dumpAll(ent, "", sb)
                 if (tube != null) { sb.append(" ||TUBE ${tube.javaClass.name}:"); dumpAll(tube, "t.", sb) }
                 try { Reflect.readAny(ent, "mStandardSerialMeta")?.let { s -> sb.append(" ||SERIAL ${s.javaClass.name}:"); dumpAll(s, "s.", sb) } } catch (_: Throwable) {}
@@ -4522,8 +4356,8 @@ object ContentFilterHook {
             // 证据：KrnReactContainerView 的 LaunchModel.f Bundle 含 bundleId(Kwaishop*)，
             // CombinedCard cardHeight=80 横条挂件——疑似 VideoFeed 内部 meta 字段驱动。
             // BFS ent 字段树（深 4 层），凡 String 值含 krn/Kwaishop/bundleId 即报告路径。
-            if (entScanDiag < 10) {
-                entScanDiag++
+            if (CfhState.entScanDiag < 10) {
+                CfhState.entScanDiag++
                 val scanHits = mutableListOf<String>()
                 fun entScan(obj: Any?, prefix: String, depth: Int, seen: MutableSet<Int>) {
                     if (obj == null || depth > 4 || scanHits.size > 12) return
@@ -4558,15 +4392,15 @@ object ContentFilterHook {
                 }
                 entScan(ent, "ent.", 0, java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Int, Boolean>()))
                 entScan(qp, "qp.", 0, java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Int, Boolean>()))
-                if (scanHits.isNotEmpty()) Logger.always("ENTSCAN #$entScanDiag cap=\"${cap.take(14)}\" hits=$scanHits")
+                if (scanHits.isNotEmpty()) Logger.always("ENTSCAN #${CfhState.entScanDiag} cap=\"${cap.take(14)}\" hits=$scanHits")
             }
-            if (feedDiagCount <= 5 && pm != null) Logger.d("PMDUMP #$feedDiagCount pm=${dumpKV(pm)}")
+            if (CfhState.feedDiagCount <= 5 && pm != null) Logger.d("PMDUMP #${CfhState.feedDiagCount} pm=${dumpKV(pm)}")
             if (pm != null) {
                 val dis = try { Reflect.readAny(pm, "mDisclaimergeMessageV2") } catch (_: Throwable) { null }
-                if (dis != null) Logger.d("DISDUMP #$feedDiagCount dis=${dumpKV(dis)} content=${try { Reflect.readAny(dis, "content") } catch (_: Throwable) { null }}")
+                if (dis != null) Logger.d("DISDUMP #${CfhState.feedDiagCount} dis=${dumpKV(dis)} content=${try { Reflect.readAny(dis, "content") } catch (_: Throwable) { null }}")
             }
         }
-        if (movieDiagCount < 8) {
+        if (CfhState.movieDiagCount < 8) {
             val tube = Reflect.readAny(ent, "mTubeModel")
             val serial = Reflect.readAny(ent, "mStandardSerialMeta")
             val adNovel = Reflect.readAny(ent, "mAdNovelVideoMeta")
@@ -4577,7 +4411,7 @@ object ContentFilterHook {
             val pmAi = pm?.let { Reflect.readBool(it, "photoAiAnalyze") }
             val isAiCap = cap.contains("AI", true) || cap.contains("疑似") || cap.contains("生成")
             if (isMovie || serial != null || adNovel != null || tube != null || isLiveMeta || isAiCap || pmAi == true) {
-                movieDiagCount++
+                CfhState.movieDiagCount++
                 val sb = StringBuilder()
                 sb.append("cap=${cap.take(25)}")
                 if (tube != null) sb.append(" | tube").append(dumpKV(tube))
@@ -4591,7 +4425,7 @@ object ContentFilterHook {
                 }
                 val vmIdx = Reflect.readAny(ent, "mVideoModel")
                 if (vmIdx != null) sb.append(" | vm").append(dumpKV(vmIdx))
-                Logger.d("deep #$movieDiagCount: $sb")
+                Logger.d("deep #${CfhState.movieDiagCount}: $sb")
             }
         }
         return feedRules(qp, ent, cm, pm, cap, allowLikeRule = true)
@@ -4706,7 +4540,7 @@ object ContentFilterHook {
 
     private fun shouldFilterContent(qp: Any): Boolean {
         if (!anyFilterOn()) return false
-        return decideBySig(contentSigCache, qp) { cachedDecide(contentFilterCache, qp) { decideContentRaw(qp) } }
+        return decideBySig(CfhState.contentSigCache, qp) { cachedDecide(CfhState.contentFilterCache, qp) { decideContentRaw(qp) } }
     }
     // = shouldFilterFeed 去掉点赞阈值规则：列表级移除只按内容类型（广告/AI/直播/短剧/电商/关键词）
     // 点赞命中项保留，避免 adapter 数据列表清空导致 Pager count 失配崩溃。
