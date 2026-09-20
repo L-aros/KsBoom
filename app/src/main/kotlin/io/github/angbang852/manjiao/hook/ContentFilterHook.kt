@@ -364,7 +364,7 @@ object ContentFilterHook {
                                     Logger.d("rerank list ${nm} filtered: $before -> ${r.size}")
                                 }
                             } else if (r != null) {
-                                val q = CfhClean.findQpInObject(r)
+                                val q = CfhProbe.findQpInObject(r)
                                 if (q != null && CfhDecide.shouldFilterFeed(q)) {
                                     if (CfhState.rerankSingleDiag < 20) {
                                         CfhState.rerankSingleDiag++
@@ -390,7 +390,7 @@ object ContentFilterHook {
                             try {
                                 val pos = chain.args.getOrNull(0) as? Int ?: -1
                                 if (CfhState.rerankScrollDiag < 10) { CfhState.rerankScrollDiag++; Logger.d("rerank selected #$pos") }
-                                if (!Logger.quiet) try { CfhClean.laFind() } catch (_: Throwable) {}
+                                if (!Logger.quiet) try { CfhWash.laFind() } catch (_: Throwable) {}
                             } catch (_: Throwable) {}
                             r
                         }
@@ -401,7 +401,7 @@ object ContentFilterHook {
                             val r = chain.proceed()
                             try {
                                 if (CfhState.rerankScrollDiag < 10) { CfhState.rerankScrollDiag++; val pos = chain.args.getOrNull(0) as? Int ?: -1; Logger.d("rerank scroll #$pos") }
-                                if (!Logger.quiet) try { CfhClean.laFind() } catch (_: Throwable) {}
+                                if (!Logger.quiet) try { CfhWash.laFind() } catch (_: Throwable) {}
                             } catch (_: Throwable) {}
                             r
                         }
@@ -453,7 +453,7 @@ object ContentFilterHook {
                                             }
                                         } catch (_: Throwable) {}
                                     }
-                                    try { CfhClean.laFind(true) } catch (_: Throwable) {}
+                                    try { CfhWash.laFind(true) } catch (_: Throwable) {}
                                 }
                             } catch (_: Throwable) {}
                             r
@@ -505,7 +505,7 @@ object ContentFilterHook {
                                 // 源头拦截：单项返回是直播/广告直接返回 null，让 adapter 跳过该位置（不进信息流）
                                 try {
                                     if (r != null) {
-                                        val q = CfhClean.findQpInObject(r)
+                                        val q = CfhProbe.findQpInObject(r)
                                         if (q != null && CfhDecide.shouldFilterFeed(q)) {
                                             if (CfhState.plistSkipDiag < 30) { CfhState.plistSkipDiag++; Logger.d("plist skip ${m.name} (${CfhUtil.readCaption(q)?.take(15)})") }
                                             return@intercept null
@@ -591,7 +591,7 @@ object ContentFilterHook {
             }
         }
         // 路径3：兜底现有 vmRef 刷新链
-        val ok = try { CfhClean.triggerRefresh() } catch (_: Throwable) { false }
+        val ok = try { CfhSupply.triggerRefresh() } catch (_: Throwable) { false }
         Logger.d("BOOTFLUSH fallback triggerRefresh=$ok")
     }
 
@@ -636,11 +636,11 @@ object ContentFilterHook {
                             // T0 仅 refresh 重拉路径（reason 含 firstRequest）去重——loadMore 续拉时
                             // T0 的 update 批次是 E1 刚供给的幸存项（已在 hist），再判重=双重去重误删
                             if (nm == "E1" && ptypes.size == 1) {
-                                CfhClean.dedupeInsertBatch(chain.args.getOrNull(0) as? MutableList<Any?>, "E1")
+                                CfhProbe.dedupeInsertBatch(chain.args.getOrNull(0) as? MutableList<Any?>, "E1")
                             } else if (nm == "T0" && ptypes.size == 6) {
                                 val reason = chain.args.getOrNull(5) as? String ?: ""
                                 if (reason.contains("firstRequest")) {
-                                    CfhClean.dedupeInsertBatch(chain.args.getOrNull(2) as? MutableList<Any?>, "T0fr")
+                                    CfhProbe.dedupeInsertBatch(chain.args.getOrNull(2) as? MutableList<Any?>, "T0fr")
                                 }
                             }
                         } catch (_: Throwable) {}
@@ -1056,10 +1056,10 @@ object ContentFilterHook {
                                     if (m.name == "aq") {
                                         try {
                                             CfhState.vmRef = a0
-                                            CfhClean.filterVmLists(a0)
+                                            CfhWash.filterVmLists(a0)
                                         } catch (_: Throwable) {}
                                     }
-                                    val qpFound = CfhClean.findQpInObject(a0)
+                                    val qpFound = CfhProbe.findQpInObject(a0)
                                     val qpHit = qpFound?.let { CfhDecide.shouldFilterFeed(it) } == true
                                     if (CfhState.gqDumpCount < 8) {
                                         CfhState.gqDumpCount++
@@ -1106,7 +1106,7 @@ object ContentFilterHook {
                             for (i in chain.args.indices) {
                                 val a = chain.args[i] ?: continue
                                 if (CfhState.qpClassRef?.isAssignableFrom(a.javaClass) == true && CfhDecide.shouldFilterFeed(a)) {
-                                    val clean = CfhClean.findCleanQp()
+                                    val clean = CfhSwap.findCleanQp()
                                     if (clean != null) {
                                         Logger.d("fragSet ${m.name} replaced: ${CfhUtil.readCaption(a)?.take(15)} -> ${CfhUtil.readCaption(clean)?.take(15)}")
                                         chain.args[i] = clean
@@ -1278,7 +1278,7 @@ object ContentFilterHook {
                                 CfhState.vmRef = fv
                                 Logger.always("vmFromAdp: ${fv.javaClass.name} via ${f2.name}")
                                 try { hookViewModel(fv) } catch (_: Throwable) {}
-                                try { CfhClean.filterVmLists(fv) } catch (_: Throwable) {}
+                                try { CfhWash.filterVmLists(fv) } catch (_: Throwable) {}
                                 break
                             }
                         } catch (_: Throwable) {}
@@ -1291,9 +1291,9 @@ object ContentFilterHook {
             // ★ 持续清洗：vmFromAdp 首次设 vmRef 后 filterVmLists 只调了一次（此时 i 可能空）。
             // 后续 feed 数据加载后 i 被填充，但 fragSeq aq 不调用 → filterVmLists 不再触发。
             // findPager 每 ~3s 由 check() 触发，此处补调 filterVmLists（500ms 节流自防过度）
-        if (CfhState.vmRef != null) { try { CfhClean.filterVmLists(CfhState.vmRef!!) } catch (_: Throwable) {} }
+        if (CfhState.vmRef != null) { try { CfhWash.filterVmLists(CfhState.vmRef!!) } catch (_: Throwable) {} }
         // LAFIND：脏元素身份反查真源字段（诊断用）
-        if (!Logger.quiet) try { CfhClean.laFind() } catch (_: Throwable) {}
+        if (!Logger.quiet) try { CfhWash.laFind() } catch (_: Throwable) {}
 
             try { hookPagerAdapter(adp.javaClass) } catch (t: Throwable) { Logger.always("hookPagerAdapter exc: ${t.message}") }
             if (isFirst) {
@@ -1335,22 +1335,22 @@ object ContentFilterHook {
                                 try {
                                     val pos = chain.args.lastOrNull() as? Int ?: -1
                                     if (result != null) {
-                                        val qp = CfhClean.findQpInObject(result)
+                                        val qp = CfhProbe.findQpInObject(result)
                                         val hit = if (qp != null) CfhDecide.shouldFilterFeed(qp) else false
                                         if (CfhState.pagerDiag < 25) {
                                             CfhState.pagerDiag++
                                             Logger.d("pager i ${nm}(#$pos) -> ${result.javaClass.simpleName} hit=$hit qp=${qp != null}")
                                         }
                                         if (qp != null && hit) {
-                                            val clean = CfhClean.pickFromQueue()
+                                            val clean = CfhSwap.pickFromQueue()
                                             if (clean != null) {
-                                                val sw = CfhClean.writeQpInto(result, clean)
+                                                val sw = CfhSwap.writeQpInto(result, clean)
                                                 CfhState.pagerSwapCount++
                                                 Logger.d("pager swap ${nm}(#$pos) sw=$sw ${CfhUtil.readCaption(qp)?.take(15)}")
                                             }
                                         } else if (qp != null && !hit && CfhState.liveWindowDiag < 8) {
                                             // ★ 视频卡是否带"直播浮窗/进入直播间引导"：找 QP 树里的 live 状态字段
-                                            val liveInfo = CfhClean.findLiveWindowField(qp)
+                                            val liveInfo = CfhProbe.findLiveWindowField(qp)
                                             if (liveInfo != null) {
                                                 CfhState.liveWindowDiag++
                                                 Logger.d("LIVEWIN ${nm}(#$pos) $liveInfo cap=${CfhUtil.readCaption(qp)?.take(16)}")
@@ -1384,13 +1384,13 @@ object ContentFilterHook {
                                 CfhState.provDiag = true
                                 val elem = result[0]
                                 Logger.d("provList diag: size=${result.size} elemCls=${elem?.javaClass?.name}")
-                                val qp = elem?.let { CfhClean.findQpInObject(it) }
+                                val qp = elem?.let { CfhProbe.findQpInObject(it) }
                                 Logger.d("provList qp: ${qp != null}")
                             }
                             if (result is MutableList<*>) {
                                 val hits = result.filter { it != null && (try { CfhDecide.shouldFilterFeed(it) } catch (_: Throwable) { false }) }
                                 if (hits.isEmpty()) {
-                                    val wrapHits = result.filter { it != null && CfhClean.findQpInObject(it)?.let { qp -> CfhDecide.shouldFilterFeed(qp) } == true }
+                                    val wrapHits = result.filter { it != null && CfhProbe.findQpInObject(it)?.let { qp -> CfhDecide.shouldFilterFeed(qp) } == true }
                                     if (wrapHits.isNotEmpty()) {
                                         @Suppress("UNCHECKED_CAST")
                                         (result as MutableList<Any?>).removeAll(wrapHits)
@@ -1413,7 +1413,7 @@ object ContentFilterHook {
                         val result = chain.proceed()
                         try {
                             if (result != null) {
-                                val qp = CfhClean.findQpInObject(result)
+                                val qp = CfhProbe.findQpInObject(result)
                                 if (qp != null && CfhDecide.shouldFilterFeed(qp)) {
                                     Logger.d("provGet blocked pos=${chain.args[0]} ${CfhUtil.readCaption(qp)?.take(25)}")
                                 }
@@ -1473,7 +1473,7 @@ object ContentFilterHook {
                                             if (nd != null && nd.isNotEmpty() && !nd.any { it != null && CfhDecide.shouldFilterFeed(it) }) {
                                                 chain.args[1] = np
                                                 if (CfhState.adpXRedirectDiag < 30) { CfhState.adpXRedirectDiag++; Logger.d("adpX p REDIRECT #$pos -> #$np") }
-                                                try { CfhClean.triggerRefresh() } catch (_: Throwable) {}
+                                                try { CfhSupply.triggerRefresh() } catch (_: Throwable) {}
                                                 break
                                             }
                                         }
@@ -1580,7 +1580,7 @@ object ContentFilterHook {
                                 val result = chain.proceed()
                                 try {
                                     if (result != null && !CfhState.adpGetSwapIn) {
-                                        val qp = CfhClean.findQpInObject(result)
+                                        val qp = CfhProbe.findQpInObject(result)
                                         if (qp != null) CfhCapture.captureFeedItem(qp)
                                         // ★ 位置↔条目权威映射（下载捕获 2026-09）：D(pos) 返回什么，
                                         // 适配器自己最清楚——记录 pos→QPhoto，下载时用 ViewPager 的
@@ -1607,10 +1607,10 @@ object ContentFilterHook {
                                         }
                                         // ★ QPhoto 提不到时用 holder 的 Fragment 类型判定（g3c.a 的 b 字段即页面 Fragment）：
                                         // 直播 holder 的 Fragment 类名含 Live
-                                        val holderLive = CfhClean.findFragInHolder(result)?.javaClass?.name?.let { fn -> fn.contains("Live") || fn.contains("Ad") } == true
+                                        val holderLive = CfhProbe.findFragInHolder(result)?.javaClass?.name?.let { fn -> fn.contains("Live") || fn.contains("Ad") } == true
                                         // ★★ 再 BFS 全图找任何 Live/Ad 实体（直播卡可能渲染在 NasaPhotoDetailFragment 里，
                                         // Fragment 类名不含 Live，QPhoto 也提不到，只能全图找实体类名）
-                                        val holderDirtyEnt = if (!holderLive) CfhClean.findDirtyEntityInHolder(result) else null
+                                        val holderDirtyEnt = if (!holderLive) CfhProbe.findDirtyEntityInHolder(result) else null
                                         // ★★★ 换页机制整体拆除（真机三次实证 01:18/22:34 闪退）：KMP groot
                                         // 框架按 fragment 创建时的位置登记 KmpSlideContext/依赖字段（如
                                         // PhotoDetailLogger），返回相邻位 fragment 顶包 = 框架状态错配，
@@ -1626,7 +1626,7 @@ object ContentFilterHook {
                                         }
                                         // 干净项入池：D 每取一个位置，普通视频就是池子的食粮
                                         if (qp != null && !CfhDecide.shouldFilterFeed(qp)) {
-                                            try { CfhClean.offerClean(qp) } catch (_: Throwable) {}
+                                            try { CfhSwap.offerClean(qp) } catch (_: Throwable) {}
                                         }
                                         // ===== 原诊断（节流�?=====
                                         if (CfhState.adpGetDiag < 10) {
@@ -1641,7 +1641,7 @@ object ContentFilterHook {
                                         }
                                         // ★★★ adapter 自持列表每次 D() 都修（去掉一次门控）：o 列表是实际显示源，
                                         // rerank 每次换页都会往 o 里塞新的直播项，必须持续清理。
-                                        try { CfhClean.fixAdapterSelfAlways(chain.thisObject) } catch (_: Throwable) {}
+                                        try { CfhSwap.fixAdapterSelfAlways(chain.thisObject) } catch (_: Throwable) {}
                                     }
                                 } catch (_: Throwable) {}
                                 result
@@ -1885,7 +1885,7 @@ object ContentFilterHook {
                                         clsQ = CfhCapture.findWindowQp(idx) ?: r
                                     }
                                     if (clsQ != null && CfhDecide.shouldFilterFeed(clsQ)) {
-                                        val clean = CfhClean.pickFromQueue()
+                                        val clean = CfhSwap.pickFromQueue()
                                         if (clean != null) {
                                             if (CfhState.vmGetSubCount < 20) { CfhState.vmGetSubCount++; Logger.d("vm getter ${m.name} -> clean: ${CfhUtil.readCaption(clsQ)?.take(18)}") }
                                             return@intercept clean
@@ -2031,7 +2031,7 @@ object ContentFilterHook {
 
     // ==================== 对外 API 转发（职责拆分后调用点不变） ====================
     fun invalidateFilterCache() = CfhDecide.invalidateCaches()
-    fun refreshContent(): Boolean = CfhClean.refreshContent()
+    fun refreshContent(): Boolean = CfhSupply.refreshContent()
     fun currentFeedPhoto(): Any? = CfhCapture.currentFeedPhoto()
     fun currentFeedFragment(): Any? = CfhCapture.currentFeedFragment()
     fun isCaptureTrusted(): Boolean = CfhCapture.isCaptureTrusted()

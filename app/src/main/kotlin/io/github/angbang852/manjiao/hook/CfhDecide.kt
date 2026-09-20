@@ -29,7 +29,7 @@ object CfhDecide {
             // 解包后若非 QPhoto（如 HomeFeaturedMilanoContainerFragment 容器），从内部找 QPhoto 再判定
             val qpClass = CfhState.qpClassRef
             if (qpClass != null && !qpClass.isAssignableFrom(inner.javaClass)) {
-                CfhClean.findQpInObject(inner) ?: inner
+                CfhProbe.findQpInObject(inner) ?: inner
             } else inner
         } else qp
         return decideBySig(CfhState.feedSigCache, realQp) { cachedDecide(CfhState.feedFilterCache, realQp) { decideFeedRaw(realQp) } }
@@ -438,7 +438,7 @@ object CfhDecide {
             (ent?.javaClass?.name ?: qp.javaClass.name) + "|" +
                 (ent?.let { e -> Reflect.readAny(e, "mCommonMeta")?.let { Reflect.readString(it, "mCaption") } } ?: "") + "|" +
                 (pm?.let { Reflect.readLong(it, "mLikeCount") } ?: -1L) + "|" +
-                (CfhClean.readPhotoId(qp) ?: "")
+                (CfhProbe.readPhotoId(qp) ?: "")
         } catch (_: Throwable) { null }
         if (sig != null) {
             cache[sig]?.let { CfhState.sigIdCache[System.identityHashCode(qp)] = it; return it }

@@ -117,13 +117,13 @@ object CfhCapture {
             val snapshot = synchronized(CfhState.liveSlideFragments) { CfhState.liveSlideFragments.toList() }
             for (f in snapshot) {
                 val p = scanFragmentPhoto(f) ?: continue
-                if (CfhClean.readPhotoId(p) == pid) return p
+                if (CfhProbe.readPhotoId(p) == pid) return p
             }
             val vm = CfhState.vmRef ?: return null
             val i = Reflect.readAny(vm, "i") as? List<*> ?: return null
             for (el in i) {
-                val q = el?.let { CfhClean.findQpInObject(it) } ?: continue
-                if (CfhClean.readPhotoId(q) == pid) return q
+                val q = el?.let { CfhProbe.findQpInObject(it) } ?: continue
+                if (CfhProbe.readPhotoId(q) == pid) return q
             }
         } catch (_: Throwable) {}
         return null
@@ -194,7 +194,7 @@ object CfhCapture {
             if (i.isEmpty()) return null
             val idx = if (pos < 0) 0 else pos % i.size
             val el = i.getOrNull(idx) ?: return null
-            val q = CfhClean.findQpInObject(el)
+            val q = CfhProbe.findQpInObject(el)
             if (q != null) return q
             return el
         } catch (_: Throwable) { return null }
@@ -208,7 +208,7 @@ object CfhCapture {
             CfhState.capturedIds.add(id)
             if (CfhState.capturedLines >= 1500) return
             CfhState.capturedLines++
-            val ent = Reflect.readAny(qp, "mEntity") ?: run { CfhClean.dataSwallow("noEnt"); return }
+            val ent = Reflect.readAny(qp, "mEntity") ?: run { CfhSwap.dataSwallow("noEnt"); return }
             val cm = Reflect.readAny(ent, "mPhotoMeta")
             val cap = cm?.let { Reflect.readString(it, "mCaption") } ?: ""
             val user = cm?.let { Reflect.readString(it, "mUserName") } ?: ""
@@ -290,7 +290,7 @@ object CfhCapture {
                     }
                 }
             }
-        } catch (t: Throwable) { CfhClean.dataSwallow("err ${t.javaClass.simpleName}") }
+        } catch (t: Throwable) { CfhSwap.dataSwallow("err ${t.javaClass.simpleName}") }
     }
 
 }

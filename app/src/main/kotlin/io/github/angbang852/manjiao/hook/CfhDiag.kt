@@ -36,10 +36,10 @@ object CfhDiag {
                         f.isAccessible = true
                         val v = f.get(adp)
                         if (v is MutableList<*> && v.size > 0) {
-                            val qp = v[0]?.let { CfhClean.findQpInObject(it) }
-                            val hits = v.filter { it != null && CfhClean.findQpInObject(it)?.let { q -> CfhDecide.shouldFilterFeed(q) } == true }.size
+                            val qp = v[0]?.let { CfhProbe.findQpInObject(it) }
+                            val hits = v.filter { it != null && CfhProbe.findQpInObject(it)?.let { q -> CfhDecide.shouldFilterFeed(q) } == true }.size
                             Logger.d("adpSelfList ${f.name} size=${v.size} elem=${v[0]?.javaClass?.name} qpFound=${qp != null} hits=$hits")
-                            CfhClean.fixAdapterSelfAlways(adp)
+                            CfhSwap.fixAdapterSelfAlways(adp)
                             if (f.name == "M" && !CfhState.elemDumped) {
                                 CfhState.elemDumped = true
                                 val e0 = v[0]
@@ -78,7 +78,7 @@ object CfhDiag {
                                             }
                                             ac = ac.superclass; alvl++
                                         }
-                                        val aqp = CfhClean.findQpInObject(av)
+                                        val aqp = CfhProbe.findQpInObject(av)
                                         Logger.d("adpElemA ${av.javaClass.name}: $asb qpIn=${aqp != null} qpHit=${aqp?.let { CfhDecide.shouldFilterFeed(it) }}")
                                     }
                                     var mm: Class<*>? = e0.javaClass
@@ -130,9 +130,9 @@ object CfhDiag {
                         val v = f.get(obj)
                         if (v is MutableList<*> && v.size > 0) {
                             val elem = v[0]
-                            val qp = elem?.let { CfhClean.findQpInObject(it) }
+                            val qp = elem?.let { CfhProbe.findQpInObject(it) }
                             Logger.d("provList ${f.name} size=${v.size} elem=${elem?.javaClass?.name} qpFound=${qp != null} qpHit=${qp?.let { CfhDecide.shouldFilterFeed(it) }}")
-                            val hits = v.filter { it != null && CfhClean.findQpInObject(it)?.let { q -> CfhDecide.shouldFilterFeed(q) } == true }.size
+                            val hits = v.filter { it != null && CfhProbe.findQpInObject(it)?.let { q -> CfhDecide.shouldFilterFeed(q) } == true }.size
                             Logger.d("provList ${f.name} hits=$hits/${v.size}")
                         }
                     } catch (_: Throwable) {}
@@ -390,7 +390,7 @@ object CfhDiag {
                                 if (clean != null) {
                                     f.set(frag, clean)
                                     try {
-                                        CfhClean.cachedMethod(vm.javaClass, "J1", qpClass, Boolean::class.javaPrimitiveType!!)?.invoke(vm, clean, true)
+                                        CfhProbe.cachedMethod(vm.javaClass, "J1", qpClass, Boolean::class.javaPrimitiveType!!)?.invoke(vm, clean, true)
                                     } catch (_: Throwable) {}
                                     Logger.d("frag M replaced: ${cap?.take(20)} -> ${CfhUtil.readCaption(clean)?.take(20)}")
                                 }
