@@ -736,6 +736,27 @@ object CfhViewHook {
                         if (qp != null && !CfhDecide.shouldFilterFeed(qp)) {
                             try { CfhSwap.offerClean(qp) } catch (_: Throwable) {}
                         }
+                        // ★★ 启动窗位置探针（2026-09 用户报「第二条 90后零食」类漏网）：
+                        // D(pos) 是 pager 的权威供给口，此处按位置打印「这一页到底是什么 +
+                        // 判没判脏 + 关键判据字段」，用于定位「第 N 条为何漏网」。
+                        // 冷启 20s 内、前 12 次供给全打（always，不受 diag 开关影响）。
+                        try {
+                            if (CfhState.processStartAt > 0L && System.currentTimeMillis() - CfhState.processStartAt < 20_000L && CfhState.adpPosProbe < 12) {
+                                CfhState.adpPosProbe++
+                                val p0 = (chain.args.getOrNull(0) as? Int) ?: -1
+                                val q1 = qp ?: clsQp
+                                val e1 = q1?.let { Reflect.readAny(it, "mEntity") }
+                                val pm1 = e1?.let { Reflect.readAny(it, "mPhotoMeta") } ?: q1?.let { Reflect.readAny(it, "mPhotoMeta") }
+                                val dis1 = pm1?.let { try { Reflect.readAny(it, "mDisclaimergeMessageV2") } catch (_: Throwable) { null } }
+                                val disC1 = dis1?.let { try { Reflect.readAny(it, "content") } catch (_: Throwable) { null } }
+                                val lm1 = e1?.let { Reflect.readAny(it, "mLivePlaybackMeta") }
+                                Logger.always("POSPROBE #$p0 cap=\"${CfhUtil.readCaption(q1 ?: result)?.take(26)}\" " +
+                                    "qp=${q1 != null} dirty=${if (q1 != null) CfhDecide.shouldFilterFeed(q1) else false} " +
+                                    "ent=${e1?.javaClass?.simpleName ?: "-"} dis=${dis1 != null} disC=${disC1?.toString()?.take(20) ?: "-"} " +
+                                    "liveMeta=${lm1 != null} liveStart=${lm1?.let { CfhUtil.safeNextLong(it, "mLiveStartTime") } ?: 0} " +
+                                    "entCls=${e1?.javaClass?.name?.substringAfterLast('.') ?: "-"}")
+                            }
+                        } catch (_: Throwable) {}
                         // ===== 原诊断（节流�?=====
                         if (CfhState.adpGetDiag < 10) {
                             CfhState.adpGetDiag++

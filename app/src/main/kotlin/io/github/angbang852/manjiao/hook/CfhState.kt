@@ -181,4 +181,6 @@ object CfhState {
     @Volatile var visibleSkipCount = 0
     /** 模块装钩时刻（进程起点近似值）：启动窗判定用（如 CfhSupply 的 in-flight 阈值收紧） */
     @Volatile var processStartAt = 0L
+    /** 启动窗位置探针计数（CfhViewHook.installAdpGet）：定位「第 N 条为何漏网」 */
+    @Volatile var adpPosProbe = 0
 }
