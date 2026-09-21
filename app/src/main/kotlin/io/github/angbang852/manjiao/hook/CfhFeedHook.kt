@@ -593,7 +593,21 @@ object CfhFeedHook {
                             clsQ = CfhCapture.findWindowQp(idx) ?: r
                         }
                         if (clsQ != null && CfhDecide.shouldFilterFeed(clsQ)) {
-                            val clean = CfhSwap.pickFromQueue()
+                            var clean = CfhSwap.pickFromQueue()
+                            // ★★ 兜底补料（2026-09 用户指出「前几条什么类型都可能漏」——
+                            // 排查确认此处是通用漏网点，与内容类型无关）：
+                            // 原实现队列空时 pickFromQueue() 返回 null ⇒ 整个 if 不成立 ⇒
+                            // 脏项 r 被原样返回上屏。开场瞬间队列最容易被取空（脏项密集、
+                            // 干净项还没来得及入队），这正是「前几条什么都可能漏」的通用成因。
+                            // 此处补第二来源：直接问 VM 要找干净项（findCleanQp 内部会再查
+                            // 队列与 VM 窗口 i），仍拿不到才放弃。
+                            if (clean == null) {
+                                clean = try { CfhSwap.findCleanQp() } catch (_: Throwable) { null }
+                                if (clean != null && CfhState.vmGetSubCount < 20) {
+                                    CfhState.vmGetSubCount++
+                                    Logger.always("vm getter ${m.name} fallback-clean: ${CfhUtil.readCaption(clsQ)?.take(18)}")
+                                }
+                            }
                             if (clean != null) {
                                 if (CfhState.vmGetSubCount < 20) { CfhState.vmGetSubCount++; Logger.d("vm getter ${m.name} -> clean: ${CfhUtil.readCaption(clsQ)?.take(18)}") }
                                 return@intercept clean

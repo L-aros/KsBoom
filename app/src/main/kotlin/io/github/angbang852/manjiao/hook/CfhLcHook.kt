@@ -344,21 +344,32 @@ object CfhLcHook {
                 Logger.d("hook frag qp setter: ${m.name}(${m.parameterTypes.map { it.simpleName }.joinToString(",")}) in ${cls.name}")
                 Logger.safe("hookFragSet.${m.name}") {
                     xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("fragSet.${key}").intercept { chain ->
+                        // ★★★ 两处修正（2026-09 用户指出「前几条什么类型都可能漏」，排查确认为
+                        // 通用漏网点，与内容类型无关）：
+                        // 1) 原用 chain.args[i] = clean —— libxposed 的 getArgs() 是只读列表，
+                        //    该赋值抛 UnsupportedOperationException 且被 catch 吞掉，**从未生效**
+                        //    （本模块此前已因同类写法导致「金币红包完全不隐藏」，全部改为
+                        //    chain.proceed(newArgs)）。这里同样改为构造新参数数组后 proceed。
+                        // 2) 原「取不到替身只打日志、脏项照传」—— 同样改为先补第二来源
+                        //    （findCleanQp 已含队列+VM 窗口查询），仍无才放弃。
+                        val args = chain.args.toMutableList()
+                        var changed = false
                         try {
-                            for (i in chain.args.indices) {
-                                val a = chain.args[i] ?: continue
+                            for (i in args.indices) {
+                                val a = args[i] ?: continue
                                 if (CfhState.qpClassRef?.isAssignableFrom(a.javaClass) == true && CfhDecide.shouldFilterFeed(a)) {
-                                    val clean = CfhSwap.findCleanQp()
+                                    val clean = CfhSwap.findCleanQp() ?: CfhSwap.pickFromQueue()
                                     if (clean != null) {
                                         Logger.d("fragSet ${m.name} replaced: ${CfhUtil.readCaption(a)?.take(15)} -> ${CfhUtil.readCaption(clean)?.take(15)}")
-                                        chain.args[i] = clean
+                                        args[i] = clean
+                                        changed = true
                                     } else {
-                                        Logger.d("fragSet ${m.name} hit but no clean: ${CfhUtil.readCaption(a)?.take(15)}")
+                                        Logger.always("fragSet ${m.name} hit but no clean: ${CfhUtil.readCaption(a)?.take(15)}")
                                     }
                                 }
                             }
                         } catch (_: Throwable) {}
-                        chain.proceed()
+                        if (changed) chain.proceed(args.toTypedArray()) else chain.proceed()
                     }
                 }
             }
