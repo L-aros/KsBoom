@@ -433,62 +433,11 @@ object CfhFeedHook {
                 if (m.returnType == Void.TYPE && m.parameterTypes.size <= 2) {
                     Logger.d("vm void: ${m.name}(${m.parameterTypes.map { it.simpleName }.joinToString(",")})")
                 }
-                if (m.parameterTypes.any { qpClass.isAssignableFrom(it) } && m.returnType == Void.TYPE) {
-                    Logger.safe("hookVMShow.${m.name}") {
-                        xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("vm.show.${c.name}.${m.name}").intercept { chain ->
-                            try {
-                                for (a in chain.args) {
-                                    if (a != null && qpClass.isAssignableFrom(a.javaClass) && CfhDecide.shouldFilterFeed(a)) {
-                                        Logger.d("vm filtered show: ${CfhUtil.readCaption(a)?.take(30)}")
-                                        return@intercept null
-                                    }
-                                }
-                            } catch (_: Throwable) {}
-                            chain.proceed()
-                            null
-                        }
-                    }
-                }
-                if (m.parameterTypes.any { java.util.List::class.java.isAssignableFrom(it) || it.name.contains("List") } && m.returnType == Void.TYPE) {
-                    Logger.safe("hookVMList.${m.name}") {
-                        xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("vm.list.${c.name}.${m.name}").intercept { chain ->
-                            try {
-                                val removed = CfhClean.filterListArgs(chain.args)
-                                if (removed > 0) Logger.d("vm filtered list: $removed via ${m.name}")
-                            } catch (_: Throwable) {}
-                            chain.proceed()
-                            null
-                        }
-                    }
-                }
+                if (m.parameterTypes.any { qpClass.isAssignableFrom(it) } && m.returnType == Void.TYPE) installVmShow(xp, c, m, qpClass)
+                if (m.parameterTypes.any { java.util.List::class.java.isAssignableFrom(it) || it.name.contains("List") } && m.returnType == Void.TYPE) installVmList(xp, c, m)
                 // y0()/B0()/E()/F0()/H()/H0()/V0() 等返�?List 的方�?= 直播/卡片�?adapter 的数据源�?
                 // 直接过滤返回值，让直播卡根本进不�?adapter�?
-                if ((m.returnType == java.util.List::class.java || m.returnType.name.contains("List")) && m.parameterTypes.isEmpty()) {
-                    Logger.d("vmListRet sig: ${m.name}() -> ${m.returnType.simpleName}")
-                    Logger.safe("hookVMListRet.${m.name}") {
-                        xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("vm.lret.${c.name}.${m.name}").intercept { chain ->
-                            val r = chain.proceed()
-                            try {
-                                if (r is List<*> && r.isNotEmpty()) {
-                                    val before = r.size
-                                    CfhClean.filterResult(r)
-                                    if (r.size != before) {
-                                        Logger.d("vm lret ${m.name} filtered: $before -> ${r.size}")
-                                        // ★ 快照诊断：若同一方法反复出现相同 before（如反复 7->2），
-                                        // 说明 V0() 每次返回新建快照，删快照无效，真源在别处。
-                                        CfhState.lretDiagCount++
-                                        if (CfhState.lretDiagCount <= 6) {
-                                            val implCls = r.javaClass.name
-                                            val firstEl = r.firstOrNull()
-                                            Logger.always("lretDIAG ${m.name}: impl=$implCls idHc=${System.identityHashCode(r)} size=${r.size} firstEl=${firstEl?.javaClass?.name ?: "null"}")
-                                        }
-                                    }
-                                }
-                            } catch (_: Throwable) {}
-                            r
-                        }
-                    }
-                }
+                if ((m.returnType == java.util.List::class.java || m.returnType.name.contains("List")) && m.parameterTypes.isEmpty()) installVmListRet(xp, c, m)
                 // ★ rerank 插卡唯一入口 T1(int,QPhoto,boolean,String)（LiveRerankPresenter d.G
                 // → VM.T1 → data_source_service.q() 单条插入）：非 List 批次 filterListArgs
                 // 结构性拦不到，data source 内部列表也不在 laFind 根集——T1 入口是唯一拦点。
@@ -498,77 +447,140 @@ object CfhFeedHook {
                     m.parameterTypes[0] == Int::class.javaPrimitiveType &&
                     qpClass.isAssignableFrom(m.parameterTypes[1]) &&
                     m.parameterTypes[2] == java.lang.Boolean.TYPE &&
-                    m.parameterTypes[3] == String::class.java) {
-                    Logger.safe("hookVMT1") {
-                        xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("vm.t1.${c.name}").intercept { chain ->
-                            try {
-                                val t1idx = chain.args.getOrNull(0) as? Int ?: -1
-                                val t1tag = chain.args.getOrNull(3) as? String ?: ""
-                                val t1qp = chain.args.getOrNull(1)
-                                val t1dirty = t1qp != null && (CfhDecide.shouldFilterFeed(t1qp) || try { CfhDecide.decideFeedRaw(t1qp) } catch (_: Throwable) { false })
-                                Logger.always("T1CALL idx=$t1idx tag=$t1tag dirty=$t1dirty CfhState.liveTop=${CfhState.liveTop} qp=${t1qp?.javaClass?.simpleName ?: "null"}")
-                                if (t1dirty) {
-                                    Logger.always("T1 SWALLOWED idx=$t1idx tag=$t1tag")
-                                    return@intercept null
-                                }
-                            } catch (_: Throwable) {}
-                            chain.proceed()
-                            null
-                        }
-                    }
-                }
-                if (m.returnType == qpClass && m.parameterTypes.size == 1 && m.parameterTypes[0] == Int::class.javaPrimitiveType) {
-                    Logger.d("vmGet sig: ${m.name}(int) -> ${m.returnType.simpleName}")
-                    Logger.safe("hookVMGet.${m.name}") {
-                        xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("vm.get.${c.name}.${m.name}").intercept { chain ->
-                            val r = try { chain.proceed() } catch (_: Throwable) { null }
-                            try {
-                                if (r != null && qpClass.isAssignableFrom(r.javaClass)) {
-                                    val idx = (chain.args.getOrNull(0) as? Int) ?: -1
-                                    var clsQ: Any? = r
-                                    // 空壳实例兜底：用富数据实例分�?
-                                    if (CfhUtil.readUserName(r, Reflect.readAny(r, "mEntity") ?: r).isEmpty()) {
-                                        clsQ = CfhCapture.findWindowQp(idx) ?: r
-                                    }
-                                    if (clsQ != null && CfhDecide.shouldFilterFeed(clsQ)) {
-                                        val clean = CfhSwap.pickFromQueue()
-                                        if (clean != null) {
-                                            if (CfhState.vmGetSubCount < 20) { CfhState.vmGetSubCount++; Logger.d("vm getter ${m.name} -> clean: ${CfhUtil.readCaption(clsQ)?.take(18)}") }
-                                            return@intercept clean
-                                        }
-                                    }
-                                }
-                            } catch (_: Throwable) {}
-                            r
-                        }
-                    }
-                }
-                if (m.name == "y" || m.name == "y0") {
-                    Logger.d("vmY hook: ${m.name}(${m.parameterTypes.map { it.simpleName }.joinToString(",")}) -> ${m.returnType.simpleName}")
-                    Logger.safe("hookVMY.${m.name}") {
-                        xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("vm.y.${c.name}.${m.name}").intercept { chain ->
-                            try {
-                                val removed = CfhClean.filterListArgs(chain.args)
-                                if (removed > 0) Logger.d("vmY filtered list: $removed")
-                            } catch (_: Throwable) {}
-                            val r = chain.proceed()
-                            try {
-                                if (CfhState.vmYDiag < 20) {
-                                    CfhState.vmYDiag++
-                                    Logger.d("vmY ret: ${m.name} -> ${r?.javaClass?.name ?: "null"}")
-                                }
-                            } catch (_: Throwable) {}
-                            try { CfhClean.filterResult(r) } catch (_: Throwable) {}
-
-
-                            r
-                        }
-                    }
-                }
+                    m.parameterTypes[3] == String::class.java) installVmT1(xp, c, m)
+                if (m.returnType == qpClass && m.parameterTypes.size == 1 && m.parameterTypes[0] == Int::class.javaPrimitiveType) installVmGet(xp, c, m, qpClass)
+                if (m.name == "y" || m.name == "y0") installVmY(xp, c, m)
             }
             cls = cls.superclass; lvl++
         }
     }
+    private fun installVmShow(xp: XposedInterface, c: Class<*>, m: java.lang.reflect.Method, qpClass: Class<*>) {
+        Logger.safe("hookVMShow.${m.name}") {
+            xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("vm.show.${c.name}.${m.name}").intercept { chain ->
+                try {
+                    for (a in chain.args) {
+                        if (a != null && qpClass.isAssignableFrom(a.javaClass) && CfhDecide.shouldFilterFeed(a)) {
+                            Logger.d("vm filtered show: ${CfhUtil.readCaption(a)?.take(30)}")
+                            return@intercept null
+                        }
+                    }
+                } catch (_: Throwable) {}
+                chain.proceed()
+                null
+            }
+        }
+    }
+
+    private fun installVmList(xp: XposedInterface, c: Class<*>, m: java.lang.reflect.Method) {
+        Logger.safe("hookVMList.${m.name}") {
+            xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("vm.list.${c.name}.${m.name}").intercept { chain ->
+                try {
+                    val removed = CfhClean.filterListArgs(chain.args)
+                    if (removed > 0) Logger.d("vm filtered list: $removed via ${m.name}")
+                } catch (_: Throwable) {}
+                chain.proceed()
+                null
+            }
+        }
+    }
+
+    private fun installVmListRet(xp: XposedInterface, c: Class<*>, m: java.lang.reflect.Method) {
+        Logger.d("vmListRet sig: ${m.name}() -> ${m.returnType.simpleName}")
+        Logger.safe("hookVMListRet.${m.name}") {
+            xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("vm.lret.${c.name}.${m.name}").intercept { chain ->
+                val r = chain.proceed()
+                try {
+                    if (r is List<*> && r.isNotEmpty()) {
+                        val before = r.size
+                        CfhClean.filterResult(r)
+                        if (r.size != before) {
+                            Logger.d("vm lret ${m.name} filtered: $before -> ${r.size}")
+                            // ★ 快照诊断：若同一方法反复出现相同 before（如反复 7->2），
+                            // 说明 V0() 每次返回新建快照，删快照无效，真源在别处。
+                            CfhState.lretDiagCount++
+                            if (CfhState.lretDiagCount <= 6) {
+                                val implCls = r.javaClass.name
+                                val firstEl = r.firstOrNull()
+                                Logger.always("lretDIAG ${m.name}: impl=$implCls idHc=${System.identityHashCode(r)} size=${r.size} firstEl=${firstEl?.javaClass?.name ?: "null"}")
+                            }
+                        }
+                    }
+                } catch (_: Throwable) {}
+                r
+            }
+        }
+    }
+
+    private fun installVmT1(xp: XposedInterface, c: Class<*>, m: java.lang.reflect.Method) {
+        Logger.safe("hookVMT1") {
+            xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("vm.t1.${c.name}").intercept { chain ->
+                try {
+                    val t1idx = chain.args.getOrNull(0) as? Int ?: -1
+                    val t1tag = chain.args.getOrNull(3) as? String ?: ""
+                    val t1qp = chain.args.getOrNull(1)
+                    val t1dirty = t1qp != null && (CfhDecide.shouldFilterFeed(t1qp) || try { CfhDecide.decideFeedRaw(t1qp) } catch (_: Throwable) { false })
+                    Logger.always("T1CALL idx=$t1idx tag=$t1tag dirty=$t1dirty CfhState.liveTop=${CfhState.liveTop} qp=${t1qp?.javaClass?.simpleName ?: "null"}")
+                    if (t1dirty) {
+                        Logger.always("T1 SWALLOWED idx=$t1idx tag=$t1tag")
+                        return@intercept null
+                    }
+                } catch (_: Throwable) {}
+                chain.proceed()
+                null
+            }
+        }
+    }
+
+    private fun installVmGet(xp: XposedInterface, c: Class<*>, m: java.lang.reflect.Method, qpClass: Class<*>) {
+        Logger.d("vmGet sig: ${m.name}(int) -> ${m.returnType.simpleName}")
+        Logger.safe("hookVMGet.${m.name}") {
+            xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("vm.get.${c.name}.${m.name}").intercept { chain ->
+                val r = try { chain.proceed() } catch (_: Throwable) { null }
+                try {
+                    if (r != null && qpClass.isAssignableFrom(r.javaClass)) {
+                        val idx = (chain.args.getOrNull(0) as? Int) ?: -1
+                        var clsQ: Any? = r
+                        // 空壳实例兜底：用富数据实例分�?
+                        if (CfhUtil.readUserName(r, Reflect.readAny(r, "mEntity") ?: r).isEmpty()) {
+                            clsQ = CfhCapture.findWindowQp(idx) ?: r
+                        }
+                        if (clsQ != null && CfhDecide.shouldFilterFeed(clsQ)) {
+                            val clean = CfhSwap.pickFromQueue()
+                            if (clean != null) {
+                                if (CfhState.vmGetSubCount < 20) { CfhState.vmGetSubCount++; Logger.d("vm getter ${m.name} -> clean: ${CfhUtil.readCaption(clsQ)?.take(18)}") }
+                                return@intercept clean
+                            }
+                        }
+                    }
+                } catch (_: Throwable) {}
+                r
+            }
+        }
+    }
+
+    private fun installVmY(xp: XposedInterface, c: Class<*>, m: java.lang.reflect.Method) {
+        Logger.d("vmY hook: ${m.name}(${m.parameterTypes.map { it.simpleName }.joinToString(",")}) -> ${m.returnType.simpleName}")
+        Logger.safe("hookVMY.${m.name}") {
+            xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("vm.y.${c.name}.${m.name}").intercept { chain ->
+                try {
+                    val removed = CfhClean.filterListArgs(chain.args)
+                    if (removed > 0) Logger.d("vmY filtered list: $removed")
+                } catch (_: Throwable) {}
+                val r = chain.proceed()
+                try {
+                    if (CfhState.vmYDiag < 20) {
+                        CfhState.vmYDiag++
+                        Logger.d("vmY ret: ${m.name} -> ${r?.javaClass?.name ?: "null"}")
+                    }
+                } catch (_: Throwable) {}
+                try { CfhClean.filterResult(r) } catch (_: Throwable) {}
+
+
+                r
+            }
+        }
+    }
+
     internal fun hookLiveFeedConstruct(xp: XposedInterface, cl: ClassLoader) {
         val cn = "com.kuaishou.android.model.feed.LiveStreamFeed"
         val c = Reflect.findClass(cn, cl) ?: return
@@ -772,3 +784,4 @@ object CfhFeedHook {
         }
     }
 }
+
