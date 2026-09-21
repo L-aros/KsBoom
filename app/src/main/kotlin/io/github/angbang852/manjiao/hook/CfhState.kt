@@ -189,6 +189,8 @@ object CfhState {
     @Volatile var rerankInjectBlocked = 0
     /** 自动进入直播间拦截计数（CfhLcHook.hookBlockAutoLive） */
     @Volatile var autoLiveBlocked = 0
+    /** 最近一次 Activity onResume 时刻：供「手动点击 vs 自动跳转」的时长兜底判据 */
+    @Volatile var lastPageSwitchAt = 0L
     /**
      * 脏项 photoId 黑名单（判脏即入，见 CfhDecide.hit）。
      * 用途：同一条内容可能被多条引用持有（数据源列表 / rerank 快照 / pager adapter /

@@ -33,6 +33,8 @@ object CfhLcHook {
                     val act = chain.thisObject as? Activity
                     if (act != null) {
                         val cn = act.javaClass.name
+                        // ★ 记录页面切换时刻（供 isLikelyUserTapByTime 兜底判据用）
+                        CfhState.lastPageSwitchAt = System.currentTimeMillis()
                         if (cn.startsWith("com.kuaishou.live.")) {
                             if (!CfhState.liveTop) Logger.always("LIVETOP on: $cn")
                             CfhState.liveTop = true
@@ -62,6 +64,58 @@ object CfhLcHook {
         "com.kuaishou.live.core.basic.activity.LivePlayActivity"
     )
 
+    /**
+     * 判断本次 startActivity 是否由用户点击触发（而非 App 自动跳转）。
+     *
+     * ★ 只看栈顶若干帧：不能全栈扫描 —— 主线程任何调用（含 Handler 定时跳转）
+     * 底层都挂在 Looper/ViewRootImpl 之下，全栈找 "ViewRootImpl" 会把自动跳转
+     * 也判成手动，过滤器形同虚设。真正有判别力的是「起跳前几帧」：
+     *   手动：View.performClick → AdapterView$PerformClick → dispatchTouchEvent …
+     *   自动：Handler.dispatchMessage → xxx$Runnable.run / Timer* / CountDownTimer …
+     */
+    /**
+     * 停留时长兜底判据（与调用栈判别取「或」）：
+     * 实证设备事件日志 —— 自动进入直播间发生在「停留 40s ~ 2m53s」之后；手动点击则是
+     * 用户看到直播预览后立即发生的。故若距上次页面切换 < 25s，更可能是手动点击，放行。
+     * 该判据不依赖栈形状，作为栈判别失效时的安全网（避免误拦手动进入）。
+     */
+    private fun isLikelyUserTapByTime(): Boolean {
+        val last = CfhState.lastPageSwitchAt
+        if (last <= 0L) return false
+        return System.currentTimeMillis() - last < 25_000L
+    }
+
+    private fun isUserInitiatedStack(): Boolean {
+        return try {
+            val st = Thread.currentThread().stackTrace
+            // ★ 放宽到 24 帧：实测手动点击走 Fragment/Context 路径，输入事件帧可能
+            // 不在最顶端（8/8 手动点击被判 byUser=false，说明 12 帧窗口太浅）。
+            val top = st.drop(2).take(24)
+            for (f in top) {
+                val c = f.className
+                val m = f.methodName
+                if (m == "performClick" || m == "onClick" ||
+                    m == "dispatchTouchEvent" || m == "onTouchEvent" || m == "onTouch" ||
+                    m == "onSingleTapUp" || m == "onSingleTapConfirmed" ||
+                    m == "onItemClick" || m == "onItemSelected" ||
+                    c.contains("InputEventReceiver") || c.contains("MotionEvent") ||
+                    c.contains("GestureDetector") || c.contains("TouchListener") ||
+                    c.contains("ItemClickListener")
+                ) return true
+            }
+            // 栈顶出现定时器/消息派发特征 → 明确判为自动
+            for (f in top) {
+                val m = f.methodName
+                if (m == "dispatchMessage" || m.contains("handleMessage") ||
+                    f.className.contains("Timer") || f.className.contains("CountDownTimer") ||
+                    f.className.contains("ScheduledExecutor") ||
+                    (m == "run" && f.className.contains("$"))
+                ) return false
+            }
+            false
+        } catch (_: Throwable) { false }
+    }
+
     internal fun hookBlockAutoLive(xp: XposedInterface) {
         try {
             val actCls = Class.forName("android.app.Activity", false, null)
@@ -84,7 +138,26 @@ object CfhLcHook {
                                 }
                                 if (cn != null && AUTO_LIVE_ACT.any { it == cn }) {
                                     CfhState.autoLiveBlocked++
-                                    if (CfhState.autoLiveBlocked <= 20) Logger.always("AUTOLIVE blocked -> $cn")
+                                    // ★★ 调用栈判别（2026-09 用户反馈「手动点击也被拦」）：
+                                    // 手动点击的栈顶含输入事件链，自动跳转来自定时器/Handler。
+                                    // 前 8 次无论拦不拦都打栈，便于核对判据是否符合实际。
+                                    val byUser = isUserInitiatedStack() || isLikelyUserTapByTime()
+                                    if (CfhState.autoLiveBlocked <= 8) {
+                                        // 打全栈（不截断）——上一版只打 12 帧且用 \n 拼接，
+                                        // 日志里没能留下可读栈，无法判定手动路径到底长什么样。
+                                        // 改为「一帧一行」的 always 输出，确保 logcat 完整保留。
+                                        val st = Thread.currentThread().stackTrace
+                                        Logger.always("AUTOLIVE probe #${CfhState.autoLiveBlocked} byUser=$byUser frames=${st.size} -> $cn")
+                                        for ((fi, fr) in st.withIndex()) {
+                                            if (fi > 26) break
+                                            Logger.always("AUTOLIVE   [$fi] ${fr.className}.${fr.methodName}:${fr.lineNumber}")
+                                        }
+                                    }
+                                    if (byUser) {
+                                        if (CfhState.autoLiveBlocked <= 20) Logger.always("AUTOLIVE pass (user tap) -> $cn")
+                                        return@intercept chain.proceed()
+                                    }
+                                    if (CfhState.autoLiveBlocked <= 20) Logger.always("AUTOLIVE blocked (auto) -> $cn")
                                     return@intercept null
                                 }
                             }
