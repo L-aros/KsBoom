@@ -49,7 +49,7 @@ object GoldFloatHook {
                             xp.hook(vm0).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                                 .setId("gold.attachfb.$cn").intercept { chain ->
                                     chain.proceed()
-                                    try { (chain.thisObject as? View)?.let { scheduleHide(it) } } catch (_: Throwable) {}
+                                    try { (chain.thisObject as? View)?.let { hideNow(it); scheduleHide(it) } } catch (_: Throwable) {}
                                     null
                                 }
                         } catch (_: Throwable) {}
@@ -64,26 +64,35 @@ object GoldFloatHook {
                             val v = chain.thisObject as? View ?: return@intercept null
                             val p = v.parent
                             Logger.d("gold float attach: $cn parent=${p?.javaClass?.name}")
+                            // ★ 源头阻断第一步（2026-09-21）：attach 后同步置 GONE。
+                            // GONE 不依赖测量结果，故无需等宽高——原实现"宽高为 0 就再等
+                            // 500ms"正是闪现的主因（那半秒浮窗是实打实可见的）
+                            hideNow(v)
                             scheduleHide(v)
                         } catch (_: Throwable) {}
                         null
                     }
-                // ★ 防御二：挂件类若覆写了 setVisibility，快手拖动/重显时会调
-                // setVisibility(VISIBLE) 把它 show 回来——hook 住立即再隐（仅三个类，零性能开销）
+                // ★ 防御二（2026-09-21 重写）：快手拖动/重显时会调 setVisibility(VISIBLE)
+                // 把浮窗 show 回来。原实现"先 proceed 让它显示、再延迟隐藏"⇒ 每次必露
+                // 一帧，且与快手的重显循环形成 HIDDEN↔re-show 拉锯（实测 65 次/分钟，
+                // 即用户看到的"反复闪现"）。改为在 proceed 之前把 VISIBLE 改写为 GONE，
+                // 显示调用根本不生效 ⇒ 零帧可见、零闪现。
                 Logger.safe("gold.vis.$cn") {
                     val vm = try { c.getDeclaredMethod("setVisibility", Int::class.javaPrimitiveType) } catch (_: Throwable) { null }
                     if (vm != null) {
                         xp.hook(vm).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                             .setId("gold.vis.$cn")
                             .intercept { chain ->
-                                chain.proceed()
                                 try {
-                                    val v = chain.thisObject as? View ?: return@intercept null
-                                    if ((chain.args[0] as Int) == View.VISIBLE) {
-                                        Logger.d("gold float re-show: ${v.javaClass.simpleName}")
-                                        scheduleHide(v)
+                                    if ((chain.args.getOrNull(0) as? Int) == View.VISIBLE) {
+                                        chain.args[0] = View.GONE
+                                        if (blockShowDiag < 20) {
+                                            blockShowDiag++
+                                            Logger.d("gold float BLOCK show: ${c.simpleName}")
+                                        }
                                     }
                                 } catch (_: Throwable) {}
+                                chain.proceed()
                                 null
                             }
                     }
@@ -92,37 +101,36 @@ object GoldFloatHook {
         }
     }
 
+    // ★ 源头阻断计数（限次日志，避免刷屏）
+    private var blockShowDiag = 0
+
+    // 同步立即隐藏：GONE 不依赖宽高测量，故不做尺寸前置判断
+    private fun hideNow(v: View) {
+        try {
+            if (!Prefs.bool(Prefs.K_IMM_GOLD, false)) return
+            if (v.visibility == View.GONE) return
+            v.visibility = View.GONE
+            Logger.d("gold float HIDDEN(now): ${v.javaClass.simpleName}")
+        } catch (_: Throwable) {}
+    }
+
     private fun scheduleHide(v: View) {
-        // attach 时尺寸可能还是 0，需多次重试。原实现每 attach 固定挂 5 个 post
-        // 持 View ≤10s 不取消（审阅 2026-09 P3）——改为单一自续期 Runnable：
-        // 隐藏成功 / 开关关闭 / detach / 重试超限即自终止
+        // attach 后快手仍可能经非 setVisibility 路径（内部字段/动画）让它复现，
+        // 保留轻量自续期兜底：2 次重试即止，不再做"宽高为 0 就等 500ms"的盲延迟
         val task = object : Runnable {
             var tries = 0
             override fun run() {
                 tries++
                 if (v.parent == null) return
-                if (tries > 20) return
+                if (tries > 2) return
                 if (!Prefs.bool(Prefs.K_IMM_GOLD, false)) return
                 if (v.visibility == View.GONE) return
-                if (v.width == 0 || v.height == 0) { v.postDelayed(this, 500); return }
                 v.visibility = View.GONE
-                Logger.d("gold float HIDDEN: ${v.javaClass.simpleName}")
+                Logger.d("gold float HIDDEN(retry$tries): ${v.javaClass.simpleName}")
             }
         }
         v.post(task)
-        handler.postDelayed(task, 500)
-        handler.postDelayed(task, 2000)
-        handler.postDelayed(task, 5000)
-    }
-
-    private fun hideIfOn(v: View) {
-        try {
-            if (v.parent == null) return
-            if (!Prefs.bool(Prefs.K_IMM_GOLD, false)) return
-            if (v.visibility == View.GONE) return
-            v.visibility = View.GONE
-            Logger.d("gold float HIDDEN: ${v.javaClass.simpleName}")
-        } catch (_: Throwable) {}
+        handler.postDelayed(task, 300)
     }
 
     private fun hookAddView(xp: XposedInterface, cl: ClassLoader) {
