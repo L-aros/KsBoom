@@ -285,16 +285,23 @@ object CfhFeedHook {
         if (!CfhState.knhbT0Hooked) Logger.d("knhb NOT FOUND (obfuscated?)")
     }
     private fun scheduleBootFlush(src: Any?) {
+        // ★★ khhbInst 捕获必须与开关解耦（2026-09 自测发现的自身 bug）：
+        // 首版把门控放在函数开头，导致关掉开关后 knhbInst 恒为 null，
+        // 连带打死补位加载 —— 实测 probe11 三连
+        // 「loadMore SKIP: knhbInst=null -> fallback refresh」。
+        // 开关只应控制「是否发起那次刷新」，不应影响实例捕获（供 loadMore 用）。
+        if (src != null && CfhState.knhbInst?.get() == null) {
+            CfhState.knhbInst = java.lang.ref.WeakReference(src)
+        }
         // ★ 开关化（2026-09 用户要求）：首次进主页自动刷新一次原为无条件行为。
-        // 关掉后本函数整体不调度（含 knhbInst 捕获），用户可 A/B 对比
+        // 关掉后仅跳过这次 refresh，其余链路不变，用户可 A/B 对比
         // 「首屏这次刷新是否反而把脏内容带进来」。
         if (!Prefs.bool(Prefs.K_FLT_BOOTFLUSH, true)) {
-            if (!CfhState.bootFlushDone) { CfhState.bootFlushDone = true; Logger.always("BOOTFLUSH disabled by switch") }
+            if (!CfhState.bootFlushDone) { CfhState.bootFlushDone = true; Logger.always("BOOTFLUSH disabled by switch (inst captured)") }
             return
         }
         if (CfhState.bootFlushDone || CfhState.bootFlushPending) return
         CfhState.bootFlushPending = true
-        if (src != null) CfhState.knhbInst = java.lang.ref.WeakReference(src)
         Logger.d("BOOTFLUSH scheduled 2s")
         CfhState.handler.postDelayed({
             CfhState.bootFlushPending = false

@@ -32,7 +32,23 @@ object CfhDecide {
                 CfhProbe.findQpInObject(inner) ?: inner
             } else inner
         } else qp
+        // ★★★ 黑名单短路：判过一次脏的 photoId 永久为脏，绕开签名缓存与解包开销。
+        // 目的：消灭「数据源已删、另一条引用又把它送回屏幕」的 0.4 秒窗口
+        // （实证 probe11：T0 44.748 删除 → 屏幕 46.665 已渲染 → frag M 47.073 才判脏）。
+        if (isBlacklisted(realQp)) return true
         return decideBySig(CfhState.feedSigCache, realQp) { cachedDecide(CfhState.feedFilterCache, realQp) { decideFeedRaw(realQp) } }
+    }
+
+    /**
+     * 脏项黑名单快查（判脏即入，见 [hit]）。
+     * 单独做一个入口而不是塞进 shouldFilterFeed：后者有签名缓存，黑名单是
+     * 「已判定的事实」，应当无条件短路，不能受缓存/开关组合变化影响。
+     */
+    fun isBlacklisted(qp: Any?): Boolean {
+        if (qp == null) return false
+        if (CfhState.dirtyPhotoIds.isEmpty()) return false
+        val id = try { CfhProbe.readPhotoId(qp) } catch (_: Throwable) { null } ?: return false
+        return id.isNotBlank() && CfhState.dirtyPhotoIds.contains(id)
     }
 
     fun decideFeedRaw(qp: Any): Boolean {
@@ -537,6 +553,20 @@ object CfhDecide {
         try {
             CfhState.filterHitStats.merge(reason, 1, Int::plus)
             CfhState.hitTotal++
+            // ★★★ 判脏即入黑名单（2026-09 用户报「开头第一/二条仍是 AI」）：
+            // 实证 probe11 —— T0 在 44.748 已把「炸薯条」从数据源删掉，但屏幕在
+            // 46.665 就画出了作者名（imm ... t=@欣欣特效），frag M 直到 47.073 才
+            // 再次判脏并替换 —— 晚了 0.4 秒，用户看到的就是这个窗口。
+            // 说明该条被 rerank/pager 的**另一条引用**重新供给（数据源删除删不到它）。
+            // 这里按 photoId 记黑名单：判过一次脏的 id 永久为脏，后续无论从哪条路径
+            // 回来（frag M / pager i / T0(i) 替换源 / 真源重建）都在毫秒级判脏，
+            // 不再依赖「哪条路径先看到它」。
+            CfhProbe.readPhotoId(qp)?.let { id ->
+                if (id.isNotBlank()) {
+                    if (CfhState.dirtyPhotoIds.size >= 512) CfhState.dirtyPhotoIds.clear()
+                    CfhState.dirtyPhotoIds.add(id)
+                }
+            }
             if (CfhState.hitLogDiag < 60) {
                 CfhState.hitLogDiag++
                 val un = try { CfhUtil.readUserName(qp, Reflect.readAny(qp, "mEntity") ?: qp) } catch (_: Throwable) { "" }
@@ -558,6 +588,9 @@ object CfhDecide {
         CfhState.contentSigCache.clear()
         CfhState.sigIdCache.clear()
         CfhState.asyncDecidePending.clear()
+        // ★ 黑名单同样必须随开关变化清空：它是「按旧开关组合判出的脏」，
+        // 不清会导致用户关掉某类过滤后，已入黑名单的项仍被过滤（开关「关不掉」）。
+        CfhState.dirtyPhotoIds.clear()
     }
 
 }

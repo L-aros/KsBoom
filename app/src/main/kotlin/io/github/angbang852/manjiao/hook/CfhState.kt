@@ -185,4 +185,15 @@ object CfhState {
     @Volatile var adpPosProbe = 0
     /** 上一轮真源清洗实际删掉的条数（CfhWash）：0=已收敛，>0=需立即再清（不被 500ms 节流饿死） */
     @Volatile var lastCleanRemoved = 0
+    /**
+     * 脏项 photoId 黑名单（判脏即入，见 CfhDecide.hit）。
+     * 用途：同一条内容可能被多条引用持有（数据源列表 / rerank 快照 / pager adapter /
+     * Fragment 字段），从数据源删除删不到其余引用，它会以「另一条」的形式重回屏幕。
+     * 实证 probe11：删除在 44.748，屏幕渲染在 46.665，二次判脏在 47.073（迟 0.4s）。
+     * 记 id 后任何路径再遇即毫秒级判脏，消除该窗口。
+     * 上限 512 防无界增长（启动期脏项密度最高，512 足够覆盖一次会话的可见窗口）。
+     */
+    val dirtyPhotoIds: MutableSet<String> = java.util.Collections.newSetFromMap(
+        java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    )
 }
