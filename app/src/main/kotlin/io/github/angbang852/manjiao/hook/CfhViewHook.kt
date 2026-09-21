@@ -622,25 +622,16 @@ object CfhViewHook {
         Logger.safe("hookAdpX.${m.name}") {
             xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adpX.${c.name}.${m.name}").intercept { chain ->
                 try { CfhClean.filterListArgs(chain.args) } catch (_: Throwable) {}
-                if (m.name == "p" && chain.args.size >= 2) {
-                    try {
-                        val pos = chain.args[1] as Int
-                        val adp = chain.thisObject
-                        val data = try { Reflect.callMethod(adp, "g0", pos) as? List<*> } catch (_: Throwable) { null }
-                        if (data != null && data.any { it != null && CfhDecide.shouldFilterFeed(it) }) {
-                            for (delta in listOf(1, -1, 2, -2, 3, -3, 4, -4)) {
-                                val np = pos + delta
-                                val nd = try { Reflect.callMethod(adp, "g0", np) as? List<*> } catch (_: Throwable) { null }
-                                if (nd != null && nd.isNotEmpty() && !nd.any { it != null && CfhDecide.shouldFilterFeed(it) }) {
-                                    chain.args[1] = np
-                                    if (CfhState.adpXRedirectDiag < 30) { CfhState.adpXRedirectDiag++; Logger.d("adpX p REDIRECT #$pos -> #$np") }
-                                    try { CfhSupply.triggerRefresh() } catch (_: Throwable) {}
-                                    break
-                                }
-                            }
-                        }
-                    } catch (_: Throwable) {}
-                }
+                // ★ 死代码移除（2026-09-21）：此处原有「脏页 p() 位置重定向」——
+                // 探测 p(ViewGroup,int) 的脏页，把参数改成邻近干净页的位置
+                // （chain.args[1] = np + triggerRefresh）。经 libxposed API 核对：
+                // Chain.getArgs() 返回**只读 List**，List.set() 必抛
+                // UnsupportedOperationException 并被本块 catch 吞掉 ——
+                // 该功能自写下起从未生效（实测 adpX p REDIRECT 日志恒为 0，
+                // 见 2026-09-21 抓包）。既从未生效、又需新增状态与刷新副作用，
+                // 故整体删除而非改造；若日后要恢复"脏页换邻页"，必须用
+                // chain.proceed(newArgs) 携带新参，并同步评估位置↔内容错配
+                // 对视口比例的影响（会引发上下压缩畸变）。
                 val r = chain.proceed()
 
                 try {

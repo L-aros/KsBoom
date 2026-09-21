@@ -123,7 +123,7 @@ object CfhState {
     var adpQpDiag = 0
     var adpXDump = 0
     var adpXLiveZapDiag = 0
-    var adpXRedirectDiag = 0
+    // adpXRedirectDiag 已随「脏页位置重定向」死代码一并移除（2026-09-21）：从未生效
     val adpXDumped = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
     var adpSelfDumped = false
     var adpGetSwapIn = false
