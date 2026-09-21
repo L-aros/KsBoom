@@ -88,11 +88,8 @@ object CfhState {
     var vmKeepDiag = 0
     val cleanQueue = ArrayDeque<Any>()
     val cleanCachePersist = ArrayDeque<Any>()
-    val dirtyUrls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
-    val cleanUrlPool = ArrayDeque<String>()
-    val hookedVmUrlClasses = mutableSetOf<String>()
-    var urlSubCount = 0
-    var playerHookTried = false
+    // dirtyUrls / cleanUrlPool / hookedVmUrlClasses / urlSubCount / playerHookTried
+    // 已随 CfhSwap 的 URL 替换子系统一并移除（2026-09-21）：非数据源拦截路线且从未生效
     @Volatile var dataDiag = 0
     var capturedLines = 0
     var liveDumpCount = 0

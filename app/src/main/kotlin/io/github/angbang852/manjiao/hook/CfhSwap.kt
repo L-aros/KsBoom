@@ -29,7 +29,8 @@ object CfhSwap {
                 CfhState.cleanCachePersist.addLast(qp)
             }
         }
-        recordCleanUrl(ent)
+        // ★ recordCleanUrl(ent) 调用已随 URL 替换子系统一并移除（2026-09-21）：
+        // 该子系统不是数据源拦截路线（在播放器对象上事后改 URL），且从未生效
         if (CfhState.offerDiag < 30) { CfhState.offerDiag++; Logger.d("offer add: ${CfhUtil.readCaption(qp)?.take(14)} queue=${CfhState.cleanQueue.size}") }
     }
     fun pickFromQueue(): Any? {
@@ -124,98 +125,17 @@ object CfhSwap {
     fun dataSwallow(reason: String) {
         if (CfhState.dataDiag < 40) { CfhState.dataDiag++; Logger.d("DATA skip $reason") }
     }
-    fun recordCleanUrl(ent: Any) {
-        val url = readVideoUrl(ent) ?: return
-        synchronized(CfhState.cleanUrlPool) {
-            if (CfhState.cleanUrlPool.none { it == url }) {
-                if (CfhState.cleanUrlPool.size >= 30) CfhState.cleanUrlPool.removeFirst()
-                CfhState.cleanUrlPool.addLast(url)
-            }
-        }
-    }
-    fun recordDirtyUrl(ent: Any) {
-        val url = readVideoUrl(ent) ?: return
-        if (url.isBlank()) return
-        CfhState.dirtyUrls.add(url)
-        if (CfhState.dirtyUrls.size > 300) CfhState.dirtyUrls.clear()
-        try {
-            val vm = Reflect.readAny(ent, "mVideoModel") ?: return
-            hookVideoModelClass(vm.javaClass)
-        } catch (_: Throwable) {}
-        hookPlayerClasses()
-    }
-    fun readVideoUrl(ent: Any): String? {
-        return try {
-            val vm = Reflect.readAny(ent, "mVideoModel") ?: return null
-            Reflect.readString(vm, "mVideoUrl")
-        } catch (_: Throwable) { null }
-    }
-    fun hookVideoModelClass(c: Class<*>) {
-        val xp = CfhState.xpRef ?: return
-        synchronized(CfhState.hookedVmUrlClasses) { if (!CfhState.hookedVmUrlClasses.add(c.name)) return }
-        for (m in c.methods) {
-            if (m.returnType != String::class.java || m.parameterTypes.isNotEmpty()) continue
-            val nm = m.name.lowercase()
-            if (!(nm.contains("url") || nm.contains("play") || nm.contains("video") || nm.contains("address"))) continue
-            try {
-                xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("vmurl.${c.name}.${m.name}").intercept { chain ->
-                    val r = chain.proceed()
-                    try {
-                        if (r is String && r.isNotBlank()) {
-                            val dirty = CfhState.dirtyUrls.any { r.startsWith(it) || it.startsWith(r) }
-                            if (dirty) {
-                                val clean = synchronized(CfhState.cleanUrlPool) { CfhState.cleanUrlPool.firstOrNull { it != r } }
-                                if (clean != null) {
-                                    if (CfhState.urlSubCount < 20) { CfhState.urlSubCount++; Logger.d("vm url ${m.name} -> clean: ${r.take(36)}") }
-                                    return@intercept clean
-                                }
-                            }
-                        }
-                    } catch (_: Throwable) {}
-                    r
-                }
-            } catch (_: Throwable) {}
-        }
-    }
-    fun hookPlayerClasses() {
-        if (CfhState.playerHookTried) return
-        CfhState.playerHookTried = true
-        val xp = CfhState.xpRef ?: return
-        val appCl = CfhState.qpClassRef?.classLoader ?: CfhState.vmRef?.javaClass?.classLoader ?: return
-        for (cn in listOf(
-            "com.kwai.video.player.KwaiMediaPlayerWrapper",
-            "com.kwai.video.player.KwaiMediaPlayerImplV3",
-            "com.kwai.video.player.KwaiMediaPlayerImpl",
-            "com.yxcorp.gifshow.media.player.PhotoDetailPlayer"
-        )) {
-            val c = try { Class.forName(cn, false, appCl) } catch (_: Throwable) { null } ?: continue
-            Logger.d("player hook class: ${c.name}")
-            for (m in c.declaredMethods) {
-                if (m.returnType != Void.TYPE || m.parameterTypes.isEmpty() || m.parameterTypes[0] != String::class.java) continue
-                val nm = m.name.lowercase()
-                if (!(nm.contains("datasource") || nm.contains("videopath") || nm.contains("videouri") || nm.contains("setdata") || nm.contains("loadurl") || nm.contains("playurl"))) continue
-                try {
-                    xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("player.${c.name}.${m.name}").intercept { chain ->
-                        try {
-                            val a0 = chain.args.getOrNull(0)
-                            if (a0 is String && a0.isNotBlank()) {
-                                val dirty = CfhState.dirtyUrls.any { a0.startsWith(it) || it.startsWith(a0) }
-                                if (dirty) {
-                                    val clean = synchronized(CfhState.cleanUrlPool) { CfhState.cleanUrlPool.firstOrNull { it != a0 } }
-                                    if (clean != null) {
-                                        if (CfhState.urlSubCount < 20) { CfhState.urlSubCount++; Logger.d("player ${m.name} -> clean: ${a0.take(36)}") }
-                                        chain.args[0] = clean
-                                    }
-                                }
-                            }
-                        } catch (_: Throwable) {}
-                        chain.proceed()
-                        null
-                    }
-                } catch (_: Throwable) {}
-            }
-        }
-    }
+    // ★ URL 替换子系统整体移除（2026-09-21）：recordCleanUrl / recordDirtyUrl /
+    // readVideoUrl / hookVideoModelClass / hookPlayerClasses 五个函数 + 其状态
+    // （dirtyUrls / cleanUrlPool / hookedVmUrlClasses / urlSubCount / playerHookTried）已删。
+    // 删除理由（架构 + 事实双重）：
+    //   1) 架构：本模块的路线是**数据源拦截**（在 VM/列表/真源层删掉脏项，让它"刷不到"）。
+    //      URL 替换是在**播放器对象上事后改值**——另一条路线，且拦不住：播放器对象
+    //      每次 setDataSource 都重新读值、对象反复重建，一次性改写不落地。
+    //   2) 事实：整条链**从未生效**——recordDirtyUrl 无调用点 ⇒ hookPlayerClasses 从未
+    //      安装 ⇒ `chain.args[0] = clean` 从未执行；dirtyUrls 从未被写入。即便被调用，
+    //      该写法也是错的（libxposed Chain.getArgs() 返回只读 List，List.set() 必抛）。
+    // 若日后确需在播放层换 URL，必须用 chain.proceed(newArgs)，并先证明它能"粘住"。
     fun fixAdapterSelfAlways(adp: Any?) {
         if (adp == null) return
         val now = System.currentTimeMillis()

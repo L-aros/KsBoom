@@ -593,7 +593,7 @@ object CfhViewHook {
         var lvl = 0
         while (cls != null && cls != Any::class.java && lvl < 4) {
             for (m in cls!!.declaredMethods) {
-                if (m.returnType.name.contains("Fragment") && m.parameterTypes.isNotEmpty() && m.parameterTypes[0] == Any::class.java) installAdpF(xp, c, m)
+                // ★ installAdpF 派发已移除（2026-09-21）：消费端参数替换，非数据源拦截且从未生效
                 // adapter 的 set/add/addAll(List) 方法：直播从这塞进信息流，在参数阶段就剔掉
                 val hasListParam = m.parameterTypes.any { it == java.util.List::class.java || it.name.contains("List") || it.name.contains("Collection") }
                 if (hasListParam && m.declaringClass == cls) installAdpList(xp, c, m)
@@ -660,43 +660,16 @@ object CfhViewHook {
         }
     }
 
-    private fun installAdpF(xp: XposedInterface, c: Class<*>, m: java.lang.reflect.Method) {
-        Logger.d("  hook adp create: ${m.name}(${m.parameterTypes.map { it.simpleName }.joinToString(",")}) in ${c.name}")
-    Logger.safe("hookAdpF.${m.name}") {
-        xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("adp.F.${c.name}").intercept { chain ->
-            try {
-                val a0 = chain.args[0]
-                if (a0 != null && CfhDecide.shouldFilterFeed(a0)) {
-                    Logger.d("adp F blocked: ${CfhUtil.readCaption(a0)?.take(25)}")
-                    val vm = CfhState.vmRef
-                    if (vm != null) {
-                        var replaced = false
-                        for (i in 0 until 15) {
-                            val qp = try { Reflect.callMethod(vm, "T0", i) } catch (_: Throwable) { null }
-                            if (qp != null && !CfhDecide.shouldFilterFeed(qp)) {
-                                chain.args[0] = qp
-                                replaced = true
-                                Logger.d("adp F replaced -> ${CfhUtil.readCaption(qp)?.take(25)}")
-                                break
-                            }
-                        }
-                        if (!replaced) {
-                            for (i in 0 until 15) {
-                                val qp = try { Reflect.callMethod(vm, "U0", i) } catch (_: Throwable) { null }
-                                if (qp != null && !CfhDecide.shouldFilterFeed(qp)) {
-                                    chain.args[0] = qp
-                                    Logger.d("adp F replaced U0 -> ${CfhUtil.readCaption(qp)?.take(25)}")
-                                    break
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (_: Throwable) {}
-            chain.proceed()
-        }
-    }
-    }
+    // ★ installAdpF 整体移除（2026-09-21）：该函数 hook「返回 Fragment 的 (Any) 方法」，
+    // 把 pager 请求的脏 QPhoto 参数替换成 vm.T0()/U0() 里的干净项。
+    // 删除理由（架构 + 事实双重）：
+    //   1) 架构：本模块路线是**数据源拦截**（在 VM/列表/真源层删掉脏项 → 脏内容"刷不到"）。
+    //      在 pager 的参数上事后换对象属**消费端补丁**——不是那条路线，也拦不住：
+    //      Fragment 参数只在这一次调用里生效，对象与视图随后被重建/重读。
+    //   2) 事实：其核心动作 `chain.args[0] = qp` 是 libxposed 只读 List 误用
+    //      （Chain.getArgs() 返回只读 List，List.set() 必抛，被 catch 吞掉）⇒ 替换
+    //      从未发生，函数只剩下一条 "adp F blocked" 日志与 vm.T0/U0 空转探测。
+    // 若日后要在视图层换数据，必须用 chain.proceed(newArgs)，并先证明它能"粘住"。
 
     private fun installAdpList(xp: XposedInterface, c: Class<*>, m: java.lang.reflect.Method) {
 // adapter 的 set/add/addAll(List) 方法：直播从这塞进信息流，在参数阶段就剔掉

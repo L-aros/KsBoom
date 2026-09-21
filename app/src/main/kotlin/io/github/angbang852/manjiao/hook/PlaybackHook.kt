@@ -23,7 +23,7 @@ object PlaybackHook {
     fun hook(xp: XposedInterface, cl: ClassLoader) {
         Logger.d("PlaybackHook: hook() called")
         xpRefD = xp
-        hookLoop(xp, cl)
+        // ★ hookLoop(xp, cl) 已移除（2026-09-21）：见下方墓碑注释
         hookBgPause(xp, cl)
         // ★ DexKit 结构发现：按方法特征找播放器类（pause+start），抗混淆/插件化
         discoverPlayers(cl)
@@ -189,49 +189,17 @@ object PlaybackHook {
         }.also { it.isDaemon = true }.start()
     }
 
-    private fun hookLoop(xp: XposedInterface, cl: ClassLoader) {
-        val candidates = arrayOf(
-            "com.kwai.player.KwaiRepresentation",
-            "com.kwai.video.aemonplayer.AemonMediaPlayer",
-            "com.kwai.video.player.AbstractMediaPlayer",
-            "com.kwai.video.waynelive.wayneplayer.WayneLivePlayer",
-            "android.media.MediaPlayer"
-        )
-        val methods = arrayOf("setLooping", "setLoop", "setRepeatMode", "setCycle", "setAutoReplay", "setAutoLoop", "setReplay")
-        var hooked = false
-        for (cn in candidates) {
-            val c = Reflect.findClass(cn, cl) ?: continue
-            val loopMethods = c.declaredMethods.filter { it.name.contains("loop", true) || it.name.contains("repeat", true) || it.name.contains("replay", true) || it.name.contains("cycle", true) }
-            if (loopMethods.isNotEmpty()) Logger.d("PlaybackHook: $cn loopMethods=${loopMethods.map { it.name + "(" + it.parameterTypes.size + ")" }}")
-            for (mn in methods) {
-                val m = Reflect.findMethod(c, mn, 1)
-                if (m != null) {
-                    xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                        .setId("pb.loop.$cn.$mn").intercept { chain ->
-                            if (Prefs.bool(Prefs.K_PB_NO_LOOP, false)) {
-                                Logger.d("pb: force no-loop $mn orig=${chain.args[0]}")
-                                // ★ 按形参类型赋值（审阅 2026-09 P2）：原一律 args[0]=false，
-                                // setRepeatMode(int) 等首参为 int 的方法装箱类型不符抛
-                                // IllegalArgumentException（被吞）→ 功能静默失效
-                                chain.args[0] = when (m.parameterTypes[0]) {
-                                    Int::class.javaPrimitiveType, java.lang.Integer::class.java -> 0
-                                    Boolean::class.javaPrimitiveType, java.lang.Boolean::class.java -> false
-                                    else -> chain.args[0]
-                                }
-                            }
-                            chain.proceed()
-                        }
-                    Logger.d("PlaybackHook: hooked $cn.$mn")
-                    hooked = true
-                }
-            }
-            // ★ 不再首个命中即 break（审阅 2026-09 P2）：快手多播放器并存
-            // （KwaiRepresentation + Aemon + MediaPlayer 兜底），只 hook 首个命中类
-            // 会让其余播放器循环失控
-        }
-        if (!hooked) Logger.d("PlaybackHook: no looping method found")
+    // ★ hookLoop 整体移除（2026-09-21）：原 hook 播放器 setLooping/setRepeatMode 等
+    // 循环参数方法，在「停止循环播放」开启时把参数改写为 false/0。
+    // 删除理由：这是**在播放器对象上事后改参数**——不是本模块的「数据源拦截」路线，
+    // 也拦不住（循环状态由播放器内部与上层各自维护，一次性改参不落地）；
+    // 且实测从未生效：核心动作 `chain.args[0] = ...` 属 libxposed 只读 List 误用
+    // （Chain.getArgs() 返回只读 List，List.set() 必抛，被 catch 吞掉）。
+    // 注意：防循环功能其余两条机制仍保留且有效——① start 拦截（播完 1s 内吞掉 start，
+    // 见 delayedHookAemon）② startCheckThread 播完时主动调 pause。后者是 2026-09-21
+    // 实测「暂停标志卡住 / 点暂停无反应」的成因（注入暂停绕过上层状态机）；
+    // 如需彻底移除防循环功能，应连同这两条与开关 K_PB_NO_LOOP 一起评估。
 
-    }
 
     // ★ 抖鸡对齐（PlaybackControlFeature）：真后台判定四路（onPause/onUserLeaveHint/
     // onStop/TRIM_MEMORY_UI_HIDDEN）+ 前台计数 + 220ms 去抖 + 多源暂停执行（BFS 找
