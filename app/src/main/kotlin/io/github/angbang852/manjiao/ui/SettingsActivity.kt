@@ -205,6 +205,11 @@ class SettingsActivity : AppCompatActivity() {
             Prefs.setBoolSync(this, Prefs.K_PB_BG_PAUSE, nv)
             toast(if (nv) "已开启后台暂停" else "已关闭后台暂停")
         })
+        panel.addView(divider())
+        panel.addView(itemSwitchRow("", "禁止自动进入直播间", Prefs.bool(Prefs.K_PB_NO_AUTO_LIVE, false)) { nv ->
+            Prefs.setBoolSync(this, Prefs.K_PB_NO_AUTO_LIVE, nv)
+            toast(if (nv) "已禁止自动进入直播间" else "已允许自动进入直播间")
+        })
         jellyEnter(panel)
     }
 

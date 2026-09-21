@@ -4,6 +4,7 @@ import android.app.Activity
 import android.view.View
 import android.view.ViewGroup
 import io.github.angbang852.manjiao.data.CurrentVideo
+import io.github.angbang852.manjiao.data.Prefs
 import io.github.angbang852.manjiao.util.Logger
 import io.github.angbang852.manjiao.util.Reflect
 import io.github.libxposed.api.XposedInterface
@@ -45,6 +46,56 @@ object CfhLcHook {
             }
             Logger.d("hookActivityLifecycle done")
         } catch (t: Throwable) { Logger.d("hookActivityLifecycle fail: ${t.message}") }
+    }
+
+    // ★★★ 禁止自动进入直播间（2026-09 用户需求）：在直播预览页停留时间长了，快手会自动
+    // 拉起直播间 Activity（设备事件日志实证：
+    //   21:27:06 ACTIVITY_RESUMED class=com.kuaishou.live.core.basic.activity.LiveSlideActivity
+    //   21:29:59 ACTIVITY_PAUSED  （停留 2m53s））。
+    // 拦截点选 Activity.startActivity*（跳转发起处），属「源头侧拒绝」而非渲染层补丁：
+    // 命中直播间 Activity 时不执行跳转，直接返回，直播间根本不会被创建。
+    // 受 K_PB_NO_AUTO_LIVE 开关控制（默认关=保持原行为）；用户手动点进直播间不受影响
+    //（手动入口走同一 startActivity，但带 FLAG_ACTIVITY_NEW_TASK 与自动跳转难以区分，
+    //  故默认关闭，由用户自行开启并按体感确认）。
+    private val AUTO_LIVE_ACT = arrayOf(
+        "com.kuaishou.live.core.basic.activity.LiveSlideActivity",
+        "com.kuaishou.live.core.basic.activity.LivePlayActivity"
+    )
+
+    internal fun hookBlockAutoLive(xp: XposedInterface) {
+        try {
+            val actCls = Class.forName("android.app.Activity", false, null)
+            val hooked = java.util.concurrent.atomic.AtomicInteger(0)
+            for (m in actCls.declaredMethods) {
+                val mn = m.name
+                if (mn != "startActivity" && mn != "startActivityForResult" && mn != "startActivityIfNeeded" && mn != "startNextMatchingActivity") continue
+                Logger.safe("blkAutoLive.$mn") {
+                    xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("blkAutoLive.$mn").intercept { chain ->
+                        try {
+                            if (Prefs.bool(Prefs.K_PB_NO_AUTO_LIVE, false)) {
+                                // Intent.getComponent().getClassName()：用直接反射取，不依赖 Reflect.callMethod 的链式返回
+                                val it0 = chain.args.getOrNull(0)
+                                var cn: String? = null
+                                if (it0 != null && it0.javaClass.name.contains("Intent")) {
+                                    val comp = try { it0.javaClass.getMethod("getComponent").invoke(it0) } catch (_: Throwable) { null }
+                                    if (comp != null) {
+                                        cn = try { comp.javaClass.getMethod("getClassName").invoke(comp) as? String } catch (_: Throwable) { null }
+                                    }
+                                }
+                                if (cn != null && AUTO_LIVE_ACT.any { it == cn }) {
+                                    CfhState.autoLiveBlocked++
+                                    if (CfhState.autoLiveBlocked <= 20) Logger.always("AUTOLIVE blocked -> $cn")
+                                    return@intercept null
+                                }
+                            }
+                        } catch (_: Throwable) {}
+                        chain.proceed()
+                    }
+                }
+                hooked.incrementAndGet()
+            }
+            Logger.always("hookBlockAutoLive installed=$hooked (switch=${Prefs.bool(Prefs.K_PB_NO_AUTO_LIVE, false)})")
+        } catch (t: Throwable) { Logger.always("hookBlockAutoLive fail: ${t.message}") }
     }
 
 

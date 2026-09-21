@@ -37,6 +37,8 @@ object ContentFilterHook {
             Logger.always("QPHOTO identity preloaded (boot window covered)")
         } catch (t: Throwable) { Logger.d("QPHOTO preload fail: ${t.message}") }
         CfhLcHook.hookActivityLifecycle(xp)
+        // ★ 禁止自动进入直播间（播放控制开关，默认关）：装在跳转发起处
+        try { CfhLcHook.hookBlockAutoLive(xp) } catch (_: Throwable) {}
         Logger.d("VER=rerank-v2 hook() cl=$cl")
         val targets = setOf(
             KsClass.PHOTO_DETAIL_ACTIVITY, KsClass.PHOTO_DETAIL_ACTIVITY_TABLET,
@@ -80,7 +82,7 @@ object ContentFilterHook {
                     "drama=${b(Prefs.K_FLT_DRAMA, true)} like_on=${b(Prefs.K_FLT_LIKE_ON)} " +
                     "kw_on=${b(Prefs.K_FLT_KW_ON)} kw=[${Prefs.str(Prefs.K_FLT_KEYWORDS, "").take(40)}] " +
                     "nomore=${b(Prefs.K_FLT_NOMORE, true)} bootflush=${b(Prefs.K_FLT_BOOTFLUSH, true)} | pb_noLoop=${b(Prefs.K_PB_NO_LOOP)} " +
-                    "pb_bgPause=${b(Prefs.K_PB_BG_PAUSE)} gold=${b(Prefs.K_IMM_GOLD)} diag=${b(Prefs.K_DIAG)} " +
+                    "pb_bgPause=${b(Prefs.K_PB_BG_PAUSE)} noAutoLive=${b(Prefs.K_PB_NO_AUTO_LIVE)} gold=${b(Prefs.K_IMM_GOLD)} diag=${b(Prefs.K_DIAG)} " +
                     "quiet=${b(Prefs.K_PERF_QUIET, true)}"
             )
         } catch (_: Throwable) {}

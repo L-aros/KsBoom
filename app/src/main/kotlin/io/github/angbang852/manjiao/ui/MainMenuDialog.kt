@@ -210,6 +210,11 @@ object MainMenuDialog {
             Prefs.setBoolSync(ctx, Prefs.K_PB_BG_PAUSE, nv)
             toast(ctx, if (nv) "已开启后台暂停" else "已关闭后台暂停")
         })
+        container.addView(divider(ctx))
+        container.addView(itemSwitchRow(ctx, "", "禁止自动进入直播间", Prefs.bool(Prefs.K_PB_NO_AUTO_LIVE, false)) { nv ->
+            Prefs.setBoolSync(ctx, Prefs.K_PB_NO_AUTO_LIVE, nv)
+            toast(ctx, if (nv) "已禁止自动进入直播间" else "已允许自动进入直播间")
+        })
         showSheetScroll(ctx, "播放控制", { show(ctx) }, container)
     }
 

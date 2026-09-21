@@ -83,6 +83,11 @@ object Prefs {
     // 播放控制
     const val K_PB_NO_LOOP = "pb_no_loop"
     const val K_PB_BG_PAUSE = "pb_bg_pause"
+    /** ★ 禁止自动进入直播间（2026-09 用户需求）：在直播预览页停留久了，快手会自动拉起
+     *  LiveSlideActivity（设备事件日志实证停留 2m53s 后 RESUMED）。
+     *  开启本开关即在 startActivity 处拒绝该跳转 —— 源头侧拦截，直播间根本不创建。
+     *  默认 false = 保持原行为。 */
+    const val K_PB_NO_AUTO_LIVE = "pb_no_auto_live"
 
     // 快手净化
     const val K_PURIFY_PUSH = "purify_push"

@@ -185,6 +185,10 @@ object CfhState {
     @Volatile var adpPosProbe = 0
     /** 上一轮真源清洗实际删掉的条数（CfhWash）：0=已收敛，>0=需立即再清（不被 500ms 节流饿死） */
     @Volatile var lastCleanRemoved = 0
+    /** rerank 源头拦截命中计数（CfhViewHook：e$d.G / d.m / e.doInject 拒绝 LiveStreamFeed） */
+    @Volatile var rerankInjectBlocked = 0
+    /** 自动进入直播间拦截计数（CfhLcHook.hookBlockAutoLive） */
+    @Volatile var autoLiveBlocked = 0
     /**
      * 脏项 photoId 黑名单（判脏即入，见 CfhDecide.hit）。
      * 用途：同一条内容可能被多条引用持有（数据源列表 / rerank 快照 / pager adapter /
