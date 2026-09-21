@@ -41,6 +41,8 @@ object CfhState {
     var knhbCallDiag = 0
     @Volatile var bootFlushDone = false
     @Volatile var bootFlushPending = false
+    // ★ 启动期真源清洗前移的一次性守卫（2026-09-21）：首次 T0/E1 后武装，避免重复起重试循环
+    @Volatile var earlyWashArmed = false
     var knhbInst: java.lang.ref.WeakReference<Any>? = null
     val seenPhotoIds = LinkedHashSet<String>()
     val photoIdCache = java.util.Collections.synchronizedMap(java.util.IdentityHashMap<Any, String?>())

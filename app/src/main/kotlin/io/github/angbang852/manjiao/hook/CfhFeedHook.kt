@@ -247,12 +247,20 @@ object CfhFeedHook {
                                 Logger.d("knhb call $nm($sizes) hist=${synchronized(CfhState.seenPhotoIds) { CfhState.seenPhotoIds.size }}")
                             }
                             val removed = CfhClean.filterListArgs(chain.args)
-                            if (removed > 0) {
-                                if (CfhState.knhbT0Diag < 30) {
-                                    CfhState.knhbT0Diag++
-                                    Logger.d("knhb.$nm filtered del=$removed")
-                                }
+                            if (removed > 0 && CfhState.knhbT0Diag < 30) {
+                                CfhState.knhbT0Diag++
+                                Logger.d("knhb.$nm filtered del=$removed")
+                            }
+                            // ★ 启动兜底「无条件武装」（2026-09-21 实测修复）：原先
+                            // scheduleBootFlush 只在 removed>0 时调度 —— 条件恰好反了：
+                            // 它本是"首批没删掉脏项、信息流没被过滤"的补药，却只在"已经
+                            // 删掉了"时发放。实测首批 del=0 ⇒ BOOTFLUSH 从未调度 ⇒
+                            // knhbInst 恒 null（日志实证 loadMore SKIP: knhbInst=null）。
+                            // 改为首次 T0/E1 进入即武装（scheduleBootFlush 自带
+                            // bootFlushDone/Pending 一次性守卫，不会重复调度）。
+                            if (nm == "T0" || nm == "E1") {
                                 scheduleBootFlush(chain.thisObject)
+                                armEarlyTrueSourceWash()
                             }
                             // ★ 防重复（单点去重）：E1 全时去重（服务端原始批次主战场）；
                             // T0 仅 refresh 重拉路径（reason 含 firstRequest）去重——loadMore 续拉时
@@ -286,6 +294,32 @@ object CfhFeedHook {
             try { doBootFlush() } catch (e: Throwable) { Logger.d("BOOTFLUSH err: ${e.message}") }
         }, 2000)
     }
+
+    // ★ 真源清洗前移（2026-09-21 实测修复）：filterVmLists（真源二层清洗）的武装原先
+    // 全部依赖 pager/fragment 生命周期（hookFragCallSeq / findPager / filterResult 补链），
+    // 实测约启动后 9 秒才 armed，而首批数据约 6 秒就进了真源 —— 中间 1.8~2 秒空白期内
+    // 真源是脏的（VMPROBE filterVmLists armed 日志晚于首批 1.8s）。
+    // 改为首次 T0/E1 进入后起一个有界重试：vmRef 一出现立即清洗（500ms × 12 = 6 秒窗口，
+    // 覆盖整个启动期）；filterVmLists 自带 500ms 节流与 keep-latest 队列，无需去重。
+    private fun armEarlyTrueSourceWash() {
+        if (CfhState.earlyWashArmed) return
+        CfhState.earlyWashArmed = true
+        Logger.d("earlyWash armed")
+        val r = object : Runnable {
+            var tries = 0
+            override fun run() {
+                tries++
+                if (tries > 12) return
+                val vm = CfhState.vmRef
+                if (vm == null) { CfhState.handler.postDelayed(this, 500); return }
+                try { CfhWash.filterVmLists(vm) } catch (_: Throwable) {}
+                if (tries == 1) Logger.always("earlyWash: bootstrap true-source clean fired")
+                CfhState.handler.postDelayed(this, 500)
+            }
+        }
+        CfhState.handler.postDelayed(r, 300)
+    }
+
     private fun doBootFlush() {
         if (CfhState.bootFlushDone) return
         CfhState.bootFlushDone = true
