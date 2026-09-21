@@ -179,4 +179,6 @@ object CfhState {
     // 同一对象累计超过上限后不再豁免，避免首屏脏项（如开头的 AI 视频）永久在屏。
     @Volatile var visibleSkipOwner: Any? = null
     @Volatile var visibleSkipCount = 0
+    /** 模块装钩时刻（进程起点近似值）：启动窗判定用（如 CfhSupply 的 in-flight 阈值收紧） */
+    @Volatile var processStartAt = 0L
 }

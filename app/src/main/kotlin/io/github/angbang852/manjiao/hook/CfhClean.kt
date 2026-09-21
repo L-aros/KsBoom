@@ -56,9 +56,16 @@ object CfhClean {
                         }
                     }
                     // 列表偏短就提前预取下一页（阈值 4：只在真快耗尽才刷新，避免每批都触发刷新带回旧推荐=重复视频）
+                    // ★ 启动窗修正（2026-09 probe4）：空壳项（文案未回填的占位）不应计入
+                    // 可用条数——实测首屏 7 条删 5 条后 a.size=2（其中 1 条是空壳），
+                    // 「2 < 4」虽触发了 prefetch，但空壳让"看起来还有货"，掩盖了真实耗尽。
+                    // 改按「有文案的条数」判定，启动窗内提高阈值到 5，尽早把数据补进来。
+                    val usable = a.count { el -> el != null && !CfhUtil.readCaption(el).isNullOrBlank() }
+                    val bootWin = CfhState.processStartAt > 0L && System.currentTimeMillis() - CfhState.processStartAt < 15_000L
+                    val needAt = if (bootWin) 5 else 4
                     if (!Prefs.bool(Prefs.K_FLT_NOMORE, true)) {
                         Logger.d("prefetch BLOCKED by K_FLT_NOMORE=false (switch off!)")
-                    } else if (a.size < 4) { Logger.d("prefetch short list=${a.size}"); CfhSupply.triggerLoadMore() }
+                    } else if (usable < needAt) { Logger.d("prefetch short usable=$usable size=${a.size} boot=$bootWin"); CfhSupply.triggerLoadMore() }
                 } else if (hits != null) {
                     // ★ 全脏多元素批次不再整体放行（审阅 2026-09）：旧注释声称交 sanitizeList
                     // 兜底但该路径并未调用，2 条直播同批插入会原样进宿主。现显式接

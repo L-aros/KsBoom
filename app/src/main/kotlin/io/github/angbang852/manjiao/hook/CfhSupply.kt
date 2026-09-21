@@ -55,9 +55,17 @@ object CfhSupply {
         } catch (_: Throwable) { false }
         if (isLoading) {
 
-            if (now - CfhState.lastLoadMoreTime > 5000) {
+            // ★ 启动窗（冷启后 15s 内）收紧等待阈值（实证 2026-09 probe4 首屏）：
+            // 「prefetch short list=2 → loadMore in flight >5s → skip: request in flight
+            //   → prefetch short list=0」——首屏 7 条里 5 条脏只剩 2 条，而补位请求卡在
+            // 宿主自己的 in-flight 状态里死等 5s，这 2 秒空窗分页器只有 2 条可翻，
+            // 用户看到的第一/第二条就是这残存的 2 条（含未回填的空壳项）。
+            // 启动窗内改用 1.2s 阈值，尽快走 refresh 兜底把数据补进来。
+            val bootWindow = now - CfhState.processStartAt < 15_000L
+            val waitMs = if (bootWindow) 1_200L else 5_000L
+            if (now - CfhState.lastLoadMoreTime > waitMs) {
 
-                Logger.always("loadMore in flight >5s -> hist reset + refresh recover")
+                Logger.always("loadMore in flight >${waitMs}ms (boot=$bootWindow) -> hist reset + refresh recover")
 
                 synchronized(CfhState.seenPhotoIds) { CfhState.seenPhotoIds.clear() }
 

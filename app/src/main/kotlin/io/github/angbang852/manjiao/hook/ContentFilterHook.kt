@@ -23,6 +23,9 @@ object ContentFilterHook {
     fun hook(xp: XposedInterface, cl: ClassLoader) {
         CfhState.xpRef = xp
         CfhState.clRef = cl
+        // ★ 进程起点（供启动窗判定用）：CfhSupply.triggerLoadMore 的 in-flight 等待阈值
+        // 在启动窗内收紧（5s→1.2s），依据就是「now - processStartAt」。
+        CfhState.processStartAt = System.currentTimeMillis()
         // ★ 启动期身份前置（2026-09-21 实测修复）：qpClassRef 原先**只**由 hookViewModel
         // 赋值（约启动后 8 秒、全屏详情页起来时），而首批数据约 6 秒就进数据源 —— 那 1.1~2 秒
         // 窗口内 qpClassRef 为 null，判脏链路的 QPhoto 解包（findQpInObject）与实体类型判定

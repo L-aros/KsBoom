@@ -15,6 +15,16 @@ object CfhSwap {
             return
         }
         if (Reflect.readAny(ent, "mPhotoMeta") == null) { if (CfhState.offerDiag < 20) { CfhState.offerDiag++; Logger.d("offer skip: noMeta") }; return }
+        // ★★ 空壳项不得入队（实证 2026-09 probe4 首屏）：冷启首屏第 2 条是数据尚未
+        // 回填的占位 QPhoto（cap 为空、声明/直播字段全空），它判不出脏 → 被当 clean
+        // 塞进替换队列（offer add: "" queue=2）。首屏 7 条里 5 条脏只剩 2 条干净，
+        // 队列被空壳占位后 pickFromQueue 只能返回空壳 → 替身上屏仍是什么都没有，
+        // 用户看到的第一/第二条正是它。空文案 = 未就绪，不作为可用替身。
+        // （真·无文案视频极罕见，且它会被下一批正常项顶掉，代价可接受）
+        if (CfhUtil.readCaption(qp).isNullOrBlank()) {
+            if (CfhState.offerDiag < 20) { CfhState.offerDiag++; Logger.d("offer skip: blankCap") }
+            return
+        }
         // ★ 加锁：offerClean（任意 hook 线程）与 pickFromQueue（cleanExecutor）
         // 无锁并发操作普通 ArrayDeque 会丢项/竞态（同文件 cleanCachePersist 有锁）
         synchronized(CfhState.cleanQueue) {
@@ -45,6 +55,8 @@ object CfhSwap {
             while (CfhState.cleanQueue.isNotEmpty() && idx < 24) {
                 val head = CfhState.cleanQueue.removeFirst()
                 idx++
+                // 空壳（文案未回填）不作替身：出队即丢弃，不重新入队
+                if (CfhUtil.readCaption(head).isNullOrBlank()) continue
                 if (qpClass.isAssignableFrom(head.javaClass) && !CfhDecide.shouldFilterFeed(head)) {
                     CfhState.cleanQueue.add(head)
                     if (head !== CfhState.lastClean || CfhState.cleanQueue.size == 1) {
@@ -56,6 +68,7 @@ object CfhSwap {
             // 持久缓存兜底
             synchronized(CfhState.cleanCachePersist) {
                 for (c in CfhState.cleanCachePersist) {
+                    if (CfhUtil.readCaption(c).isNullOrBlank()) continue
                     if (qpClass.isAssignableFrom(c.javaClass) && !CfhDecide.shouldFilterFeed(c) && c !== CfhState.lastClean) {
                         CfhState.lastClean = c
                         return c
