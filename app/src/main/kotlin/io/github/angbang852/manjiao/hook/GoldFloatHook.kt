@@ -83,17 +83,36 @@ object GoldFloatHook {
                         xp.hook(vm).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                             .setId("gold.vis.$cn")
                             .intercept { chain ->
-                                try {
-                                    if ((chain.args.getOrNull(0) as? Int) == View.VISIBLE) {
-                                        chain.args[0] = View.GONE
-                                        if (blockShowDiag < 20) {
-                                            blockShowDiag++
-                                            Logger.d("gold float BLOCK show: ${c.simpleName}")
-                                        }
+                                var wantShow = false
+                                try { wantShow = (chain.args.firstOrNull() as? Int) == View.VISIBLE } catch (_: Throwable) {}
+                                val on = try { Prefs.bool(Prefs.K_IMM_GOLD, false) } catch (_: Throwable) { false }
+                                var r: Any? = null
+                                if (wantShow && on) {
+                                    // ★ 正确改参方式（2026-09-21 实测修正）：libxposed 的
+                                    // Chain.getArgs() 返回**只读 List**，`chain.args[0] = x`
+                                    // 走 List.set() 会抛 UnsupportedOperationException（被
+                                    // catch 吞掉 → 既不拦也不报，浮窗彻底失管）。必须用
+                                    // proceed(Object[]) 重载携带新参数。
+                                    r = try {
+                                        val na = chain.args.toMutableList()
+                                        na[0] = View.GONE
+                                        chain.proceed(na.toTypedArray())
+                                    } catch (_: Throwable) {
+                                        try { chain.proceed() } catch (_: Throwable) { null }
                                     }
-                                } catch (_: Throwable) {}
-                                chain.proceed()
-                                null
+                                } else {
+                                    r = try { chain.proceed() } catch (_: Throwable) { null }
+                                }
+                                if (wantShow && on) {
+                                    // 同步兜底：即便框架忽略新参，同一次主线程回调内立即置
+                                    // GONE（不等下一帧 → 不会被绘制）
+                                    try { (chain.thisObject as? View)?.let { hideNow(it) } } catch (_: Throwable) {}
+                                    if (blockShowDiag < 20) {
+                                        blockShowDiag++
+                                        Logger.d("gold float BLOCK show: ${c.simpleName}")
+                                    }
+                                }
+                                r
                             }
                     }
                 }
@@ -115,22 +134,23 @@ object GoldFloatHook {
     }
 
     private fun scheduleHide(v: View) {
-        // attach 后快手仍可能经非 setVisibility 路径（内部字段/动画）让它复现，
-        // 保留轻量自续期兜底：2 次重试即止，不再做"宽高为 0 就等 500ms"的盲延迟
+        // attach 后快手仍可能经非 setVisibility 路径（内部字段/动画/父容器）让它复现，
+        // 保留有界看门狗：10 次 × 500ms（5s 窗口）即止，不再做"宽高为 0 就盲等"的延迟
         val task = object : Runnable {
             var tries = 0
             override fun run() {
                 tries++
                 if (v.parent == null) return
-                if (tries > 2) return
+                if (tries > 10) return
                 if (!Prefs.bool(Prefs.K_IMM_GOLD, false)) return
-                if (v.visibility == View.GONE) return
-                v.visibility = View.GONE
-                Logger.d("gold float HIDDEN(retry$tries): ${v.javaClass.simpleName}")
+                if (v.visibility != View.GONE) {
+                    v.visibility = View.GONE
+                    if (tries <= 3) Logger.d("gold float HIDDEN(watch$tries): ${v.javaClass.simpleName}")
+                }
+                v.postDelayed(this, 500)
             }
         }
         v.post(task)
-        handler.postDelayed(task, 300)
     }
 
     private fun hookAddView(xp: XposedInterface, cl: ClassLoader) {
