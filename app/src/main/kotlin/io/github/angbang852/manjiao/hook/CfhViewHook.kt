@@ -76,7 +76,7 @@ object CfhViewHook {
                             try {
                                 val pos = chain.args.getOrNull(0) as? Int ?: -1
                                 if (CfhState.rerankScrollDiag < 10) { CfhState.rerankScrollDiag++; Logger.d("rerank selected #$pos") }
-                                if (!Logger.quiet) try { CfhWash.laFind() } catch (_: Throwable) {}
+                                if (!Logger.quiet) try { CfhWatch.laFind() } catch (_: Throwable) {}
                             } catch (_: Throwable) {}
                             r
                         }
@@ -87,7 +87,7 @@ object CfhViewHook {
                             val r = chain.proceed()
                             try {
                                 if (CfhState.rerankScrollDiag < 10) { CfhState.rerankScrollDiag++; val pos = chain.args.getOrNull(0) as? Int ?: -1; Logger.d("rerank scroll #$pos") }
-                                if (!Logger.quiet) try { CfhWash.laFind() } catch (_: Throwable) {}
+                                if (!Logger.quiet) try { CfhWatch.laFind() } catch (_: Throwable) {}
                             } catch (_: Throwable) {}
                             r
                         }
@@ -139,7 +139,7 @@ object CfhViewHook {
                                             }
                                         } catch (_: Throwable) {}
                                     }
-                                    try { CfhWash.laFind(true) } catch (_: Throwable) {}
+                                    try { CfhWatch.laFind(true) } catch (_: Throwable) {}
                                 }
                             } catch (_: Throwable) {}
                             r
@@ -427,7 +427,7 @@ object CfhViewHook {
             // findPager 每 ~3s 由 check() 触发，此处补调 filterVmLists（500ms 节流自防过度）
         if (CfhState.vmRef != null) { try { CfhWash.filterVmLists(CfhState.vmRef!!) } catch (_: Throwable) {} }
         // LAFIND：脏元素身份反查真源字段（诊断用）
-        if (!Logger.quiet) try { CfhWash.laFind() } catch (_: Throwable) {}
+        if (!Logger.quiet) try { CfhWatch.laFind() } catch (_: Throwable) {}
 
             try { hookPagerAdapter(adp.javaClass) } catch (t: Throwable) { Logger.always("hookPagerAdapter exc: ${t.message}") }
             if (isFirst) {
