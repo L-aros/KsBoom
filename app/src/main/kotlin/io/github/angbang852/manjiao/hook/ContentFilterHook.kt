@@ -79,7 +79,7 @@ object ContentFilterHook {
                     "live=${b(Prefs.K_FLT_LIVE)} ai=${b(Prefs.K_FLT_AI)} ec=${b(Prefs.K_FLT_EC)} " +
                     "drama=${b(Prefs.K_FLT_DRAMA, true)} like_on=${b(Prefs.K_FLT_LIKE_ON)} " +
                     "kw_on=${b(Prefs.K_FLT_KW_ON)} kw=[${Prefs.str(Prefs.K_FLT_KEYWORDS, "").take(40)}] " +
-                    "nomore=${b(Prefs.K_FLT_NOMORE, true)} | pb_noLoop=${b(Prefs.K_PB_NO_LOOP)} " +
+                    "nomore=${b(Prefs.K_FLT_NOMORE, true)} bootflush=${b(Prefs.K_FLT_BOOTFLUSH, true)} | pb_noLoop=${b(Prefs.K_PB_NO_LOOP)} " +
                     "pb_bgPause=${b(Prefs.K_PB_BG_PAUSE)} gold=${b(Prefs.K_IMM_GOLD)} diag=${b(Prefs.K_DIAG)} " +
                     "quiet=${b(Prefs.K_PERF_QUIET, true)}"
             )

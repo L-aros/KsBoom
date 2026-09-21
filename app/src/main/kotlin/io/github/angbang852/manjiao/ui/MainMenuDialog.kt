@@ -291,6 +291,7 @@ object MainMenuDialog {
             arrayOf("按点赞数过滤", Prefs.K_FLT_LIKE_ON, true, true),
             arrayOf("按字段过滤", Prefs.K_FLT_KW_ON, false, true),
             arrayOf("优化无更多视频", Prefs.K_FLT_NOMORE, true, false),
+            arrayOf("首次进主页刷新", Prefs.K_FLT_BOOTFLUSH, true, false),
         )
         val container = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL

@@ -285,6 +285,13 @@ object CfhFeedHook {
         if (!CfhState.knhbT0Hooked) Logger.d("knhb NOT FOUND (obfuscated?)")
     }
     private fun scheduleBootFlush(src: Any?) {
+        // ★ 开关化（2026-09 用户要求）：首次进主页自动刷新一次原为无条件行为。
+        // 关掉后本函数整体不调度（含 knhbInst 捕获），用户可 A/B 对比
+        // 「首屏这次刷新是否反而把脏内容带进来」。
+        if (!Prefs.bool(Prefs.K_FLT_BOOTFLUSH, true)) {
+            if (!CfhState.bootFlushDone) { CfhState.bootFlushDone = true; Logger.always("BOOTFLUSH disabled by switch") }
+            return
+        }
         if (CfhState.bootFlushDone || CfhState.bootFlushPending) return
         CfhState.bootFlushPending = true
         if (src != null) CfhState.knhbInst = java.lang.ref.WeakReference(src)

@@ -57,6 +57,10 @@ object Prefs {
     const val K_FLT_KEYWORDS = "flt_keywords"
     const val K_FLT_KW_ON = "flt_kw_on"
     const val K_FLT_NOMORE = "flt_nomore"
+    /** ★ 首次进主页自动刷新一次（BOOTFLUSH，2026-09 用户要求做成开关）：
+     *  原为无条件行为。关掉可 A/B 对比「首屏刷新是否反而把脏内容带进来」。
+     *  默认 true = 保持原行为不变。 */
+    const val K_FLT_BOOTFLUSH = "flt_bootflush"
 
 
     // 性能优化
