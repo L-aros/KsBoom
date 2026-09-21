@@ -43,6 +43,11 @@ object CfhUtil {
                 if (t != null && t.isNotBlank()) return true
                 val dm = Reflect.readAny(serial, "dataMap")
                 if (dm is Map<*, *> && dm.isNotEmpty()) return true
+                // ★ 嵌套 serial 字段（mStandardSerialInfo / mStandardSerialFromStandard）**刻意不查**：
+                // 2026-09-21 实测样本 `第1集｜当学校空降了个新主任` 的违规信号确实藏在这两个
+                // 嵌套字段里，但本函数历史上有过「serial 非空即拦」导致美食/工业美学/央视新闻
+                // 批量误伤的记录（见 CfhDecide 剧集规则处的注释）。该样本已由 CfhDecide 里
+                // 「文案以 第N集/话 开头」的精确规则覆盖，无需在此放松判据。
             }
             val column = Reflect.readAny(ent, "mColumnMeta")
             if (column != null) {

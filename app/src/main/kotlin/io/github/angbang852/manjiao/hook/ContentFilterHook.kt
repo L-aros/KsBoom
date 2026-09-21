@@ -2,6 +2,7 @@ package io.github.angbang852.manjiao.hook
 
 import android.app.Activity
 import io.github.angbang852.manjiao.KsClass
+import io.github.angbang852.manjiao.data.Prefs
 import io.github.angbang852.manjiao.util.Logger
 import io.github.angbang852.manjiao.util.Reflect
 import io.github.libxposed.api.XposedInterface
@@ -65,6 +66,21 @@ object ContentFilterHook {
         CfhViewHook.hookKrnProbe(xp, cl)
         CfhViewHook.hookKrnReactContainerView(xp, cl)
         CfhLcHook.hookFragmentCrashGuard(xp, cl)
+        // ★ 启动期配置转储（2026-09-21）：排除"开关状态靠猜"——每次冷启动把生效的
+        // 过滤/播放/装饰开关一次性打进日志（Logger.always 不受静默影响）。
+        // 排障时先看这一行，就知道当日判定该命中哪些规则。
+        try {
+            fun b(k: String, d: Boolean = false) = if (Prefs.bool(k, d)) "1" else "0"
+            Logger.always(
+                "FLTCFG ads=${b(Prefs.K_FLT_ADS)} advideo=${b(Prefs.K_FLT_ADVIDEO)} image=${b(Prefs.K_FLT_IMAGE)} " +
+                    "live=${b(Prefs.K_FLT_LIVE)} ai=${b(Prefs.K_FLT_AI)} ec=${b(Prefs.K_FLT_EC)} " +
+                    "drama=${b(Prefs.K_FLT_DRAMA, true)} like_on=${b(Prefs.K_FLT_LIKE_ON)} " +
+                    "kw_on=${b(Prefs.K_FLT_KW_ON)} kw=[${Prefs.str(Prefs.K_FLT_KEYWORDS, "").take(40)}] " +
+                    "nomore=${b(Prefs.K_FLT_NOMORE, true)} | pb_noLoop=${b(Prefs.K_PB_NO_LOOP)} " +
+                    "pb_bgPause=${b(Prefs.K_PB_BG_PAUSE)} gold=${b(Prefs.K_IMM_GOLD)} diag=${b(Prefs.K_DIAG)} " +
+                    "quiet=${b(Prefs.K_PERF_QUIET, true)}"
+            )
+        } catch (_: Throwable) {}
     }
 
 

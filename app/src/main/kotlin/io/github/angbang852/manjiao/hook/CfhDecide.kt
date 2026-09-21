@@ -310,6 +310,19 @@ object CfhDecide {
             // ★ 官方作者声明 AI 标记（数据层铁证路径：caption 无标签也能拦，「刷不到」关键）
             val disC = CfhUtil.aiDisclaimerContent(pm)
             if (disC != null) { hit("ai:disclaimer \"${disC.take(18)}\"", qp); return true }
+            // ★ 声明对象「存在 + 内容未填充 → 判脏」兜底（2026-09-21 冷启动实测）：
+            // 首批插入时 mDisclaimergeMessageV2 对象已在、但 content 尚未填充（重拉后才填，
+            // 实证：同一条 00.91 判干净、04.28 才命中 ai:disclaimer）⇒ 纯内容匹配在启动窗漏判。
+            // 仅当**内容为空/读不到**时才按"存在"判脏；内容非空但不含 AI 关键词的仍放行
+            // （保留原有语义，避免误伤非 AI 类声明）。对照同批 6 条：仅 2 条带该字段，其余
+            // 连字段都没有 ⇒ 「存在」本身即有判别力。
+            if (pm != null) {
+                val disOb = try { Reflect.readAny(pm, "mDisclaimergeMessageV2") } catch (_: Throwable) { null }
+                if (disOb != null) {
+                    val c = try { Reflect.readAny(disOb, "content") as? String } catch (_: Throwable) { null }
+                    if (c.isNullOrBlank()) { hit("ai:disclaimerPending", qp); return true }
+                }
+            }
         }
         if (Prefs.bool(Prefs.K_FLT_DRAMA, true)) {
             if (Reflect.readAny(ent, "mKwAppNativeDrama") != null) { hit("drama:kwAppNative", qp); return true }
@@ -334,6 +347,13 @@ object CfhDecide {
                 }
             }
             if (DRAMA_TEXTS.any { cap.contains(it) }) { hit("drama:capText", qp); return true }
+            // ★ 「第 N 集/话」集数标记（2026-09-21 冷启动实测）：实证漏拦样本
+            // `第1集｜当学校空降了个新主任` —— DRAMA_TEXTS 只有上集/下集/选集/全剧/剧集/正片，
+            // 不含「第1集」形态。
+            // ★ 必须**锚定文案开头**且只用「集/话」（不含「期」）：本规则所在开关默认开启，
+            // 非锚定版本实测会误伤 `2024年第3期最值得买的十件好物` 这类普通视频；分集标题
+            // 的实际形态是「第N集｜...」「第十二话：...」——标记必在开头。
+            if (Regex("^\\s*第\\s*[0-9一二三四五六七八九十百]+\\s*[集话]").containsMatchIn(cap)) { hit("drama:episodeNo", qp); return true }
             if (cap.contains("完整版", true) || cap.contains("整部剧", true) || cap.contains("追剧", true)) { hit("drama:capFull", qp); return true }
             if (cap.contains("电影", true) || cap.contains("电视剧", true)) { hit("drama:capMovie", qp); return true }
         }
