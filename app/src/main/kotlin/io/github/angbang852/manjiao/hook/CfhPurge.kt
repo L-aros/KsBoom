@@ -8,6 +8,10 @@ import io.github.angbang852.manjiao.util.Logger
 // sanitizeList（身份判脏 + 后台闸门 + all-dirty 兜底刷新）与主线程删除器。
 // 下沉为共享底层，切断 CfhClean<->CfhWash 互引环——清洗管线各层统一在此删除。
 object CfhPurge {
+    /** 可见脏项豁免上限：超过后不再豁免（约 1.5s @250ms 调用间隔），避免首屏脏项永久在屏 */
+    internal const val MAX_VISIBLE_SKIPS = 6
+
+
     fun sanitizeList(list: MutableList<Any?>, tag: String, allowEmpty: Boolean = false) {
         // ★ 上下双视频修复（2026-09）：正在显示的那条不得删除（原地删→分页器位置
         // 错位→当前页叠出两个视频），等它滑出视野再清
@@ -17,7 +21,6 @@ object CfhPurge {
         val now = System.currentTimeMillis()
         for (i in list.indices) {
             val it = list[i] ?: continue
-            if (it === visibleNow) continue
             val dirty = try {
                 val q = CfhProbe.findQpInObject(it) ?: it
                 // 兼容裸实体（LiveStreamFeed/广告实体无 mEntity 包装）：按类名兜底（受对应开关控制）；
@@ -28,6 +31,22 @@ object CfhPurge {
                     (Prefs.bool(Prefs.K_FLT_ADS, false) && rawCls.contains("AdFeed")) ||
                     (Prefs.bool(Prefs.K_FLT_LIVE, false) && !CfhUtil.isStructClsName(rawCls) && rawCls.contains("Live", true))
             } catch (_: Throwable) { false }
+            if (it === visibleNow) {
+                // ★★ 首屏可见项豁免上限（实证 2026-09 用户报「开头的 AI 内容拦不住」）：
+                // 该条 === visibleNow → 旧代码无条件 continue，62 次 sanitize 全跳过它，
+                // 真源 s0$b 又因 hasQp=false 从未清洗 ⇒ 它永久在屏，用户看到的就是它。
+                // 保留原保护本意（原地删可见项→分页器错位→叠出两个视频），但设容忍上限：
+                // 同一脏项被豁免超过 MAX_VISIBLE_SKIPS 次后按常规删除，由 triggerRefresh 补位。
+                if (!dirty) { CfhState.visibleSkipOwner = null; CfhState.visibleSkipCount = 0; continue }
+                if (CfhState.visibleSkipOwner !== it) {
+                    CfhState.visibleSkipOwner = it
+                    CfhState.visibleSkipCount = 1
+                    continue
+                }
+                CfhState.visibleSkipCount++
+                if (CfhState.visibleSkipCount <= MAX_VISIBLE_SKIPS) continue
+                Logger.always("visible-dirty unshielded tag=$tag skips=${CfhState.visibleSkipCount}")
+            }
             if (dirty) dirtyIdx.add(i)
         }
         if (dirtyIdx.isEmpty()) return

@@ -132,15 +132,31 @@ object CfhWash {
                                             val cleanDeep: () -> Int = {
                                                 var removedDeep = 0
                                                 var i = m2.size - 1
+                                                var skippedVisible = 0
                                                 while (i >= 0) {
                                                     val el2 = m2[i]
                                                     // ★ 上下双视频修复（2026-09）：正在显示的那条不得删除——
                                                     // 原地删会让分页器位置错位、当前页被换数据时叠出两个视频。
-                                                    // 等它滑出视野（不再是 currentFeedPhoto）再清
-                                                    if (el2 != null && el2 === visibleNow) { i--; continue }
+                                                    // 等它滑出视野（不再是 currentFeedPhoto）再清。
+                                                    // ★★ 豁免上限（同 CfhPurge.sanitizeList）：首屏可见项若本身
+                                                    // 是脏项，无条件豁免会让它永久在屏（用户报「开头 AI 拦不住」）。
+                                                    // 同一对象累计豁免超过 MAX_VISIBLE_SKIPS 次后按常规删除。
+                                                    if (el2 != null && el2 === visibleNow) {
+                                                        val d2 = qpDirect && CfhDecide.shouldFilterContent(el2)
+                                                        if (!d2) { CfhState.visibleSkipOwner = null; CfhState.visibleSkipCount = 0; i--; continue }
+                                                        if (CfhState.visibleSkipOwner !== el2) {
+                                                            CfhState.visibleSkipOwner = el2
+                                                            CfhState.visibleSkipCount = 1
+                                                            i--; continue
+                                                        }
+                                                        CfhState.visibleSkipCount++
+                                                        if (CfhState.visibleSkipCount <= CfhPurge.MAX_VISIBLE_SKIPS) { i--; continue }
+                                                        skippedVisible++
+                                                    }
                                                     if (el2 == null || (qpDirect && CfhDecide.shouldFilterContent(el2))) { m2.removeAt(i); removedDeep++ }
                                                     i--
                                                 }
+                                                if (skippedVisible > 0) Logger.always("vmDeepClean unshielded $deepTag skips=$skippedVisible")
                                                 removedDeep
                                             }
                                             if (CfhUtil.isBgMutationSafe(m2) || Looper.myLooper() == Looper.getMainLooper()) {

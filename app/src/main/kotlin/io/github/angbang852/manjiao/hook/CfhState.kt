@@ -175,4 +175,8 @@ object CfhState {
     val feedSigCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     val contentSigCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     val asyncDecidePending = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+    // ★ 可见脏项豁免计数（CfhPurge）：记「当前被可见性保护跳过的那个脏对象」及其次数。
+    // 同一对象累计超过上限后不再豁免，避免首屏脏项（如开头的 AI 视频）永久在屏。
+    @Volatile var visibleSkipOwner: Any? = null
+    @Volatile var visibleSkipCount = 0
 }
