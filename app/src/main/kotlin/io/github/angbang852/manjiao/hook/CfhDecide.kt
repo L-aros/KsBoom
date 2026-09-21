@@ -219,7 +219,12 @@ object CfhDecide {
             if (CfhState.feedDiagCount <= 5 && pm != null) Logger.d("PMDUMP #${CfhState.feedDiagCount} pm=${CfhUtil.dumpKV(pm)}")
             if (pm != null) {
                 val dis = try { Reflect.readAny(pm, "mDisclaimergeMessageV2") } catch (_: Throwable) { null }
-                if (dis != null) Logger.d("DISDUMP #${CfhState.feedDiagCount} dis=${CfhUtil.dumpKV(dis)} content=${try { Reflect.readAny(dis, "content") } catch (_: Throwable) { null }}")
+                // ★ 启动窗（前 6 条）用 always 打：diag 关着也要看到声明原文，
+                // 否则永远无法确认「对象存在即脏」是否误伤（dumpKV 打印全部字段值）
+                if (dis != null) {
+                    val line = "DISDUMP #${CfhState.feedDiagCount} dis=${CfhUtil.dumpKV(dis)} content=${try { Reflect.readAny(dis, "content") } catch (_: Throwable) { null }}"
+                    if (CfhState.feedDiagCount <= 6) Logger.always(line) else Logger.d(line)
+                }
             }
         }
         if (CfhState.movieDiagCount < 8) {
@@ -279,8 +284,16 @@ object CfhDecide {
         }
         if (Prefs.bool(Prefs.K_FLT_LIVE, false)) {
             if (!CfhUtil.isStructClsName(ent.javaClass.name) && ent.javaClass.name.contains("Live", true)) { hit("live:entCls", qp); return true }
+            // ★ 实证纠正：mLivePlaybackMeta 在 24/24 条普通 feed 上均非空 —— 「对象存在」
+            // 毫无判别力，旧 live:meta 靠内层 mLiveStreamId 也常为 null 而漏。
+            // liveMeta 内层真正有判别力的是：mLiveStartTime>0 / mStartTime>0 / mShopLive=true
+            // （实测普通视频三项恒为 0/0/false）。
             val lm = Reflect.readAny(ent, "mLivePlaybackMeta")
-            if (lm != null && Reflect.readAny(lm, "mLiveStreamId") != null) { hit("live:meta", qp); return true }
+            if (lm != null) {
+                if (Reflect.readAny(lm, "mLiveStreamId") != null) { hit("live:meta", qp); return true }
+                if (CfhUtil.safeNextLong(lm, "mLiveStartTime") > 0L || CfhUtil.safeNextLong(lm, "mStartTime") > 0L) { hit("live:startTime", qp); return true }
+                if (Reflect.readBool(lm, "mShopLive") == true) { hit("live:shopLive", qp); return true }
+            }
             if (pm != null && Reflect.readBool(pm, "mCurrentLivingState") == true) { hit("live:state", qp); return true }
             // 视频广告 + 进入直播间入口（普�?VideoFeed，无 Live 类）：靠入口文案识别
             if (cap.contains("进入直播间") || cap.contains("点击进入直播") || cap.contains("直播中") || cap.contains("提现") || cap.contains("入账") || cap.contains("任务奖励")) { hit("live:capText", qp); return true }
@@ -319,8 +332,12 @@ object CfhDecide {
             if (pm != null) {
                 val disOb = try { Reflect.readAny(pm, "mDisclaimergeMessageV2") } catch (_: Throwable) { null }
                 if (disOb != null) {
+                    // ★ 语义判别（实证 probe 19:35 QDBG）：该字段同时承载 AI 声明与
+                    // 「含虚构演绎内容，仅供娱乐」（真人剧情/配音）。按文字区分，AI 类拦；
+                    // 文字为空时按待定处理（真实 AI 声明偶发 content 未回填）。
                     val c = try { Reflect.readAny(disOb, "content") as? String } catch (_: Throwable) { null }
                     if (c.isNullOrBlank()) { hit("ai:disclaimerPending", qp); return true }
+                    if (CfhUtil.isAiDisclaimerText(c)) { hit("ai:disclaimer \"${c.take(18)}\"", qp); return true }
                 }
             }
         }
@@ -425,8 +442,14 @@ object CfhDecide {
         if (Prefs.bool(Prefs.K_FLT_AI, false)) {
             val pm = Reflect.readAny(ent, "mPhotoMeta")
             if (pm != null && Reflect.readBool(pm, "photoAiAnalyze") == true) { hit("ai:analyzeFlag", qp); return true }
-            val disC = CfhUtil.aiDisclaimerContent(pm)
-            if (disC != null) { hit("ai:disclaimer \"${disC.take(18)}\"", qp); return true }
+            // ★ quick 路径：首屏走这里，deep 兜底太晚（实测首屏 L7 批次到 deep 仅 6ms，
+            // UI 已上屏）。与 deep 同语义：AI 声明文字拦，「虚构演绎」类放行。
+            val disObQ = try { Reflect.readAny(pm, "mDisclaimergeMessageV2") } catch (_: Throwable) { null }
+            if (disObQ != null) {
+                val cq = try { Reflect.readAny(disObQ, "content") as? String } catch (_: Throwable) { null }
+                if (cq.isNullOrBlank()) { hit("ai:disclaimerPending", qp); return true }
+                if (CfhUtil.isAiDisclaimerText(cq)) { hit("ai:disclaimer \"${cq.take(18)}\"", qp); return true }
+            }
             val cm = Reflect.readAny(ent, "mCommonMeta")
             val cap = cm?.let { Reflect.readString(it, "mCaption") } ?: ""
             if (cap.contains("ai生成", true) || cap.contains("AI创作") || cap.contains("疑似") || cap.contains("AIGC") || cap.contains("人工智能")) { hit("ai:capText", qp); return true }

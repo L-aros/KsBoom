@@ -80,11 +80,26 @@ object CfhUtil {
     fun aiDisclaimerContent(pm: Any?): String? {
         if (pm == null) return null
         val dis = try { Reflect.readAny(pm, "mDisclaimergeMessageV2") } catch (_: Throwable) { null } ?: return null
-        val c = try { Reflect.readAny(dis, "content") as? String } catch (_: Throwable) { null } ?: return null
-        if (c.isBlank()) return null
-        if (c.contains("AI") || c.contains("ai生成", true) || c.contains("AIGC") || c.contains("人工智能")) return c
+        val c = try { Reflect.readAny(dis, "content") as? String } catch (_: Throwable) { null }
+        if (c.isNullOrBlank()) return null
+        // ★ 实证（probe 19:35 冷启，QDBG 打印声明原文）：同一字段承载两类声明，必须区分——
+        //   AI 类 ：「该内容属于AI生成」「疑似含AI生成内容」「作者声明：含AI生成内容」
+        //   非AI类：「作者声明：含虚构演绎内容，仅供娱乐」（真人配音/剧情演绎，不得误伤）
+        // 因此按「对象存在即脏」会误杀虚构演绎项（实测搞笑配音、光合计划被误拦），
+        // 必须回到文字语义判别，并把 AI 判定收敛到 aiGen 关键词族。
+        if (AI_DISCLAIMER_REGEX.containsMatchIn(c)) return c
         return null
     }
+
+    /** AI 声明文字判别：覆盖「AI生成/疑似含AI/AIGC/人工智能/由AI制作」等官方措辞变体 */
+    private val AI_DISCLAIMER_REGEX = Regex(
+        "AI生成|AI制作|AI创作|AI合成|疑似含AI|含AI生成|属于AI|AIGC|人工智能",
+        RegexOption.IGNORE_CASE
+    )
+
+    /** 声明文字是否属 AI 类（供 quick/deep 两条决策路径共用，避免两处口径漂移） */
+    fun isAiDisclaimerText(text: String?): Boolean =
+        !text.isNullOrBlank() && AI_DISCLAIMER_REGEX.containsMatchIn(text)
 
     fun isStructClsName(cn: String): Boolean =
         cn.contains("Presenter") || cn.contains("Callback") || cn.contains("Fragment") ||
