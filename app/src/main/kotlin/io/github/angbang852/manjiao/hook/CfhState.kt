@@ -183,4 +183,6 @@ object CfhState {
     @Volatile var processStartAt = 0L
     /** 启动窗位置探针计数（CfhViewHook.installAdpGet）：定位「第 N 条为何漏网」 */
     @Volatile var adpPosProbe = 0
+    /** 上一轮真源清洗实际删掉的条数（CfhWash）：0=已收敛，>0=需立即再清（不被 500ms 节流饿死） */
+    @Volatile var lastCleanRemoved = 0
 }

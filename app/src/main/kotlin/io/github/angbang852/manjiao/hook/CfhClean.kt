@@ -83,7 +83,21 @@ object CfhClean {
     fun filterResult(result: Any?): Int {
         if (result !is MutableList<*>) return 0
         val now = System.currentTimeMillis()
-        val key = System.identityHashCode(result)
+        // ★★ 节流键修正（实证 2026-09 probe7）：原用 System.identityHashCode(result)，
+        // 但 result 是 VM V0()/H0() 每次重建的快照副本（新对象、新身份哈希），
+        // 节流表永远命中不了 —— 实测 262 次「feed filtered ret 1 first: 薛之谦」，
+        // 90% 的调用间隔 <200ms（最小 0.0ms），删了又被重建回来，屏幕表现为
+        // 「同一位置一条脏内容变成另一条脏内容」（用户所报现象）。
+        // 改用内容指纹（size + 首/次项文案 + 元素身份集合的稳定部分），
+        // 使「同一批内容」无论被重建多少次都只处理一次/200ms。
+        val fp = try {
+            val n = result.size
+            val c0 = result.getOrNull(0)?.let { CfhUtil.readCaption(it)?.take(16) } ?: "-"
+            val c1 = result.getOrNull(1)?.let { CfhUtil.readCaption(it)?.take(16) } ?: "-"
+            val cl = result.getOrNull(0)?.javaClass?.name ?: "-"
+            "$n|$cl|$c0|$c1"
+        } catch (_: Throwable) { null }
+        val key = fp?.hashCode() ?: System.identityHashCode(result)
         val last = CfhState.retThrottle[key]
         if (last != null && now - last < 200) return 0
         CfhState.retThrottle[key] = now

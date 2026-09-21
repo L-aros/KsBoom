@@ -11,7 +11,18 @@ object CfhWash {
     fun filterVmLists(obj: Any) {
         if (CfhState.liveTop) return
         val now = System.currentTimeMillis()
-        if (now - CfhState.lastFilterVmListsAt < 500) return
+        // ★★ 节流语义修正（实证 2026-09 probe7）：原实现「距上次 <500ms 即 return」，
+        // 而 ret 路径在脏项驻留时会以 <200ms 间隔高频回调（实测 262 次 / 30 秒），
+        // 导致真源清洗几乎永远进不来 —— 实测 deep: 清洗只在启动瞬间跑了 2 次
+        // （40.391 / 40.401），此后 33 秒全程静默，真源 6 条纹丝不动，
+        // V0()/H0()/E/F0 反复重建把同一脏项送回副本（vm lret 恒为 "6 -> 5"），
+        // 屏幕表现为「同一位置的脏内容换成另一条脏内容」（用户所报现象）。
+        // 修正：仍做 500ms 节流防抖，但「上一轮确实清掉了脏项」时立即重新武装，
+        // 保证真源收敛（清到干净为止），而不是被高频调用饿死。
+        // 修正：上一轮「确实清掉了脏项」时立即重新武装（不等 500ms），保证真源收敛；
+        // 上一轮「没清掉东西」（已收敛/无可清）时仍按 500ms 节流防抖空转。
+        val converged = CfhState.lastCleanRemoved == 0
+        if (converged && now - CfhState.lastFilterVmListsAt < 500) return
         CfhState.lastFilterVmListsAt = now
         // 一次性探针：确认 vmRef 状态与真源清洗是否激活（查「大青蜜桃」在屏滞留）
         if (!CfhState.vmRefProbeDone) { CfhState.vmRefProbeDone = true; Logger.always("VMPROBE filterVmLists armed: vm=${obj.javaClass.name}") }
@@ -161,12 +172,12 @@ object CfhWash {
                                             }
                                             if (CfhUtil.isBgMutationSafe(m2) || Looper.myLooper() == Looper.getMainLooper()) {
                                                 val sw2 = cleanDeep()
-                                                if (sw2 > 0) Logger.always("vmDeepClean $deepTag: removed $sw2 (left ${m2.size})")
+                                                if (sw2 > 0) { CfhState.lastCleanRemoved = sw2; Logger.always("vmDeepClean $deepTag: removed $sw2 (left ${m2.size})") }
                                             } else {
                                                 CfhState.handler.post {
                                                     try {
                                                         val sw2 = cleanDeep()
-                                                        if (sw2 > 0) Logger.always("vmDeepClean-main $deepTag: removed $sw2 (left ${m2.size})")
+                                                        if (sw2 > 0) { CfhState.lastCleanRemoved = sw2; Logger.always("vmDeepClean-main $deepTag: removed $sw2 (left ${m2.size})") }
                                                     } catch (_: Throwable) {}
                                                 }
                                             }
