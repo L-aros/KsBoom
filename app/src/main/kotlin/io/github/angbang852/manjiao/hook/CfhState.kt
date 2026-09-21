@@ -202,4 +202,6 @@ object CfhState {
     val dirtyPhotoIds: MutableSet<String> = java.util.Collections.newSetFromMap(
         java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     )
+    /** rerank 重灌链探针计数（方案 A：定位 d.u/d.v 实际改写的容器） */
+    @Volatile var rerankPeek = 0
 }

@@ -72,23 +72,30 @@ object CfhViewHook {
                 if (m.parameterTypes.size == 1 && m.parameterTypes[0] == Int::class.javaPrimitiveType) {
                     Logger.safe("rerank.sel.${cn}.${m.name}") {
                         xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("rerank.sel.${cn}.${m.name}").intercept { chain ->
-                            val r = chain.proceed()
+                            // ★★★★ 关键修正（probe24 实证）：原先只在 proceed() **之后**调
+                            // laFind —— 那时页面已选中并完成绑定（55.414 已上屏，55.607 才判脏，
+                            // 迟 0.19s，用户看到的就是这个窗口）。
+                            // onPageSelected 是「选中即将发生」的通知，因此清洗必须放在
+                            // proceed() **之前**：先把 VM/adapter 链表清干净，再让选中/绑定发生，
+                            // 脏项就没有机会被绑定到 Fragment 上。
                             try {
-                                val pos = chain.args.getOrNull(0) as? Int ?: -1
-                                if (CfhState.rerankScrollDiag < 10) { CfhState.rerankScrollDiag++; Logger.d("rerank selected #$pos") }
-                                if (!Logger.quiet) try { CfhWatch.laFind() } catch (_: Throwable) {}
+                                val pos0 = chain.args.getOrNull(0) as? Int ?: -1
+                                if (CfhState.rerankScrollDiag < 10) { CfhState.rerankScrollDiag++; Logger.d("rerank selected #$pos0 (pre-clean)") }
+                                if (!Logger.quiet) try { CfhWatch.laFind(force = true) } catch (_: Throwable) {}
                             } catch (_: Throwable) {}
+                            val r = chain.proceed()
                             r
                         }
                     }
                 } else if (m.parameterTypes.size == 3 && m.parameterTypes[0] == Int::class.javaPrimitiveType) {
                     Logger.safe("rerank.scroll.${cn}.${m.name}") {
                         xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId("rerank.scroll.${cn}.${m.name}").intercept { chain ->
-                            val r = chain.proceed()
+                            // 同 selected：清洗放到 proceed() 之前（滚动即将改变页面时的前置清洗）
                             try {
-                                if (CfhState.rerankScrollDiag < 10) { CfhState.rerankScrollDiag++; val pos = chain.args.getOrNull(0) as? Int ?: -1; Logger.d("rerank scroll #$pos") }
-                                if (!Logger.quiet) try { CfhWatch.laFind() } catch (_: Throwable) {}
+                                if (CfhState.rerankScrollDiag < 10) { CfhState.rerankScrollDiag++; val pos = chain.args.getOrNull(0) as? Int ?: -1; Logger.d("rerank scroll #$pos (pre-clean)") }
+                                if (!Logger.quiet) try { CfhWatch.laFind(force = true) } catch (_: Throwable) {}
                             } catch (_: Throwable) {}
+                            val r = chain.proceed()
                             r
                         }
                     }
@@ -149,6 +156,218 @@ object CfhViewHook {
                 }
             }
         } catch (_: Throwable) {}
+        // ★★★ rerank 深挖探针（2026-09 用户报「直播一直停在第二条不动」，方案 C）：
+        // 实证 probe17 —— rerank 列表已被我们过滤（rerank list E filtered: 6 -> 1），
+        // 但直播仍在 5 秒后上屏（imm LiveTextView t=@会理突尼斯软籽石榴），且
+        // rerank selected/scroll 的下标是 #500000（远超列表长度，是插入哨兵）。
+        // 结论：rerank 不是从那个列表取数据渲染直播 —— 必须看清它 22 个方法的真身
+        // 与 e$b 回调链，找到真正的注入点。此处只 dump 不改变行为。
+        try {
+            val jd = Class.forName("com.kuaishou.live.rerank.d", false, cl)
+            Logger.always("RERANK-DUMP d methods=${jd.declaredMethods.size}")
+            for (m in jd.declaredMethods) {
+                Logger.always("RERANK-DUMP d.${m.name}(${m.parameterTypes.joinToString(",") { it.simpleName }}) -> ${m.returnType.simpleName} mod=${java.lang.reflect.Modifier.toString(m.modifiers)}")
+            }
+            val jdB = Class.forName("com.kuaishou.live.rerank.e\$b", false, cl)
+            Logger.always("RERANK-DUMP e\$b methods=${jdB.declaredMethods.size} fields=${jdB.declaredFields.size}")
+            for (m in jdB.declaredMethods) {
+                Logger.always("RERANK-DUMP e\$b.${m.name}(${m.parameterTypes.joinToString(",") { it.simpleName }}) -> ${m.returnType.simpleName}")
+            }
+            for (f in jdB.declaredFields) {
+                Logger.always("RERANK-DUMP e\$b fld ${f.name}:${f.type.simpleName} static=${java.lang.reflect.Modifier.isStatic(f.modifiers)}")
+            }
+            val jdE = Class.forName("com.kuaishou.live.rerank.e", false, cl)
+            Logger.always("RERANK-DUMP e methods=${jdE.declaredMethods.size} fields=${jdE.declaredFields.size}")
+            for (m in jdE.declaredMethods) {
+                Logger.always("RERANK-DUMP e.${m.name}(${m.parameterTypes.joinToString(",") { it.simpleName }}) -> ${m.returnType.simpleName}")
+            }
+            val jdD2 = Class.forName("com.kuaishou.live.rerank.e\$d", false, cl)
+            Logger.always("RERANK-DUMP e\$d methods=${jdD2.declaredMethods.size} fields=${jdD2.declaredFields.size}")
+            for (m in jdD2.declaredMethods) {
+                Logger.always("RERANK-DUMP e\$d.${m.name}(${m.parameterTypes.joinToString(",") { it.simpleName }}) -> ${m.returnType.simpleName}")
+            }
+        } catch (t: Throwable) { Logger.always("RERANK-DUMP err: ${t.message}") }
+        // ★★★★ rerank 源头拦截（方案 C，2026-09）：由 RERANK-DUMP 拿到真身签名后确定。
+        // 实证 probe17/18：rerank 列表已被过滤（6 -> 1）但直播仍上屏，selected 下标是
+        // 哨兵值 #500000 —— 直播不经那个列表。真正入口是三个直吃 LiveStreamFeed 的方法：
+        //   e$d.G(int, LiveStreamFeed)  ← 带位置，最像插入点
+        //   d.m(LiveStreamFeed)         ← 实体入口
+        //   e.doInject()                ← 执行注入的动作
+        // 三处都在「feed 实体进入 rerank 管线」阶段（源头侧，非渲染消费侧），
+        // 符合本模块「只做源头拦截」原则。命中即拒绝，使直播卡根本进不了 rerank。
+        try {
+            val dCls = Class.forName("com.kuaishou.live.rerank.d", false, cl)
+            val eDCls = Class.forName("com.kuaishou.live.rerank.e\$d", false, cl)
+            val eCls = Class.forName("com.kuaishou.live.rerank.e", false, cl)
+            var nRr = 0
+            fun rrHook(cls: Class<*>, m: java.lang.reflect.Method, tag: String) {
+                Logger.safe(tag) {
+                    xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId(tag).intercept { chain ->
+                        // 入参直接带 LiveStreamFeed 的（G/m）：源头拒绝，不让它进管线
+                        try {
+                            if (Prefs.bool(Prefs.K_FLT_LIVE, false) && !CfhState.liveTop) {
+                                for (a in chain.args) {
+                                    if (a == null) continue
+                                    val an = a.javaClass.name
+                                    if (an.contains("LiveStreamFeed")) {
+                                        CfhState.rerankInjectBlocked++
+                                        if (CfhState.rerankInjectBlocked <= 20) {
+                                            Logger.always("RERANK-BLOCK $tag arg=${an.substringAfterLast('.')} cap=${CfhUtil.readCaption(a)?.take(22)}")
+                                        }
+                                        return@intercept null
+                                    }
+                                }
+                            }
+                        } catch (_: Throwable) {}
+                        val r = chain.proceed()
+                        // doInject：注入动作完成后立即清扫（它可能从别处取数据注入）
+                        try {
+                            if (tag.endsWith("doInject") && Prefs.bool(Prefs.K_FLT_LIVE, false) && !CfhState.liveTop) {
+                                if (CfhState.rerankInjectBlocked <= 20) Logger.always("RERANK doInject -> force laFind")
+                                CfhWatch.laFind(force = true)
+                            }
+                        } catch (_: Throwable) {}
+                        r
+                    }
+                }
+                nRr++
+            }
+            for (m in eDCls.declaredMethods) {
+                if (m.name == "G" && m.parameterTypes.size == 2 && m.parameterTypes[0] == Int::class.javaPrimitiveType) rrHook(eDCls, m, "rerank.eD.G")
+            }
+            for (m in dCls.declaredMethods) {
+                if (m.name == "m" && m.parameterTypes.size == 1 && m.parameterTypes[0].name.contains("LiveStreamFeed")) rrHook(dCls, m, "rerank.d.m")
+            }
+            for (m in eCls.declaredMethods) {
+                if (m.name == "doInject") rrHook(eCls, m, "rerank.e.doInject")
+            }
+            // ★★★★ 真正的重灌入口（probe24 调用栈实证）：
+            //   fltCaller: p.h <- ... <- Hiesh.g <- d.v <- d.u <- n.run
+            // 直播 rerank 由 Runnable(n.run) 驱动，经 d.u()/d.v(boolean) 触发，
+            // 最终由 d.r(Map,List,boolean) / d.g(List,List) 把数据灌回 feed —— 它们
+            // 直接接收要灌入的 List，这里过滤即源头拦截（此前钩的 eD.G/d.m/doInject
+            // 都不在这条路径上，故 RERANK-BLOCK 恒为 0）。
+            // 该路径每秒重灌一次，把已删除的脏项带回，正是「删了又回来」的根因。
+            fun rrListHook(m: java.lang.reflect.Method, tag: String) {
+                Logger.safe(tag) {
+                    xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId(tag).intercept { chain ->
+                        // 参数里的 List 就地过滤（灌入前剔掉脏项）
+                        try {
+                            if (!CfhState.liveTop) {
+                                var n = 0
+                                for (a in chain.args) {
+                                    if (a is MutableList<*>) {
+                                        @Suppress("UNCHECKED_CAST")
+                                        val removed = CfhClean.filterListArgs(listOf(a as MutableList<Any?>))
+                                        n += removed
+                                        if (removed > 0) {
+                                            CfhState.rerankInjectBlocked++
+                                            if (CfhState.rerankInjectBlocked <= 20) Logger.always("RERANK-FILTER $tag argList removed=$removed left=${a.size}")
+                                        }
+                                    }
+                                }
+                                if (n > 0) { /* 已就地过滤 */ }
+                            }
+                        } catch (_: Throwable) {}
+                        chain.proceed()
+                    }
+                }
+                nRr++
+            }
+            for (m in dCls.declaredMethods) {
+                if (m.name == "r" && m.parameterTypes.size == 3 && m.parameterTypes.any { it.name.contains("List") }) rrListHook(m, "rerank.d.r")
+                if (m.name == "g" && m.parameterTypes.size == 2 && m.parameterTypes.all { it.name.contains("List") }) rrListHook(m, "rerank.d.g")
+                if (m.name == "d" || m.name == "e") {
+                    if (m.parameterTypes.size == 4 && m.parameterTypes.any { it.name.contains("List") }) rrListHook(m, "rerank.d.$m")
+                }
+            }
+            // ★★★★ 方案 A：拦重灌链中段（probe24 栈实证 d.v <- d.u <- n.run）：
+            // d.u()/d.v(boolean) 是「n.run 发起 → 真正重灌」的必经中段。此处不改行为，
+            // 先把它们实际携带/触碰的 List 全部 dump 出来 —— 之前钩 d.r/d.g 零触发，
+            // 说明重灌走的不是那两个方法，必须先看清 d.u/d.v 到底动了哪些容器。
+            fun rrPeekHook(m: java.lang.reflect.Method, tag: String) {
+                Logger.safe(tag) {
+                    xp.hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId(tag).intercept { chain ->
+                        val r = chain.proceed()
+                        try {
+                            if (!CfhState.liveTop && CfhState.rerankPeek < 24) {
+                                CfhState.rerankPeek++
+                                // 全字段 dump（名+类型+值类名）：上一版只扫 List 字段却打不出
+                                // 任何东西，说明 d 自身不持 List —— 它经成员对象间接持容器。
+                                val self = chain.thisObject
+                                val sb = StringBuilder("RERANK-PEEK $tag this=")
+                                sb.append(self?.javaClass?.name ?: "null")
+                                var cc: Class<*>? = self?.javaClass
+                                var lv = 0
+                                while (cc != null && cc != Any::class.java && lv < 4) {
+                                    for (f in cc!!.declaredFields) {
+                                        if (java.lang.reflect.Modifier.isStatic(f.modifiers)) continue
+                                        try {
+                                            f.isAccessible = true
+                                            val v = f.get(self)
+                                            sb.append(" | ${f.name}:${f.type.simpleName}=${v?.javaClass?.simpleName ?: "null"}")
+                                            if (v is List<*>) {
+                                                sb.append("(n=${v.size},el=${v.firstOrNull()?.javaClass?.simpleName ?: "-"})")
+                                                val fq = v.firstOrNull()?.let { CfhProbe.findQpInObject(it) }
+                                                if (fq != null && (try { CfhDecide.shouldFilterFeed(fq) } catch (_: Throwable) { false })) sb.append("DIRTY")
+                                            } else if (v != null && v.javaClass.isArray) {
+                                                val len = java.lang.reflect.Array.getLength(v)
+                                                val fe = if (len > 0) java.lang.reflect.Array.get(v, 0) else null
+                                                sb.append("(len=$len,el=${fe?.javaClass?.simpleName ?: "-"})")
+                                            }
+                                        } catch (_: Throwable) {}
+                                    }
+                                    cc = cc.superclass; lv++
+                                }
+                                Logger.always(sb.toString())
+                                // ★★ Map/Set 内容 dump（由上一版字段结构得到：a:Map=HashMap、
+                                // h:Set=HashSet 才是 d 真正持有的容器；c/d 是 long 计时戳，
+                                // e/f 为计数 —— 即「停留计时器」+ 候选池 + 去重集）。
+                                // 直播项极可能躺在这个 Map 里，看清它的键值才能定位注入点。
+                                try {
+                                    val fb = self?.javaClass?.getDeclaredField("a")
+                                    fb?.isAccessible = true
+                                    val mv = fb?.get(self)
+                                    if (mv is Map<*, *>) {
+                                        val msb = StringBuilder("RERANK-MAP a size=${mv.size}")
+                                        var mi = 0
+                                        for ((k, v) in mv) {
+                                            if (mi >= 6) break
+                                            val kq = if (k != null) CfhProbe.findQpInObject(k) else null
+                                            val vq = if (v != null) CfhProbe.findQpInObject(v) else null
+                                            msb.append(" | [${k?.javaClass?.simpleName}:${kq?.let { CfhUtil.readCaption(it)?.take(14) } ?: k}]->")
+                                            msb.append("[${v?.javaClass?.simpleName}:${vq?.let { CfhUtil.readCaption(it)?.take(14) } ?: v}]")
+                                            mi++
+                                        }
+                                        Logger.always(msb.toString())
+                                    }
+                                    val fh = self?.javaClass?.getDeclaredField("h")
+                                    fh?.isAccessible = true
+                                    val sv = fh?.get(self)
+                                    if (sv is Set<*>) {
+                                        val ssb = StringBuilder("RERANK-SET h size=${sv.size}")
+                                        var si = 0
+                                        for (e in sv) {
+                                            if (si >= 6) break
+                                            ssb.append(" | ${e?.javaClass?.simpleName}:${(e as? String)?.take(16) ?: e}")
+                                            si++
+                                        }
+                                        Logger.always(ssb.toString())
+                                    }
+                                } catch (_: Throwable) {}
+                            }
+                        } catch (_: Throwable) {}
+                        r
+                    }
+                }
+                nRr++
+            }
+            for (m in dCls.declaredMethods) {
+                if (m.name == "u" && m.parameterTypes.isEmpty()) rrPeekHook(m, "rerank.d.u")
+                if (m.name == "v" && m.parameterTypes.size == 1 && m.parameterTypes[0] == Boolean::class.javaPrimitiveType) rrPeekHook(m, "rerank.d.v")
+            }
+            Logger.always("RERANK source hooks installed=$nRr")
+        } catch (t: Throwable) { Logger.always("RERANK source hook err: ${t.message}") }
         if (hookedAny) Logger.d("hookLiveRerank done pkg=$pkg")
     }
 

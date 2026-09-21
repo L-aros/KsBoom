@@ -163,6 +163,21 @@ object CfhUtil {
         fun put(tag: String, fn: String, v: Any?) {
             if (v != null && n < 22) { sb.append(",").append(tag).append(".").append(fn).append("=").append(v.toString().take(12)); n++ }
         }
+        // ★★ mDisclaimergeMessageV2 打印 content 原文而非对象 toString（2026-09 排查「开头漏网」）：
+        // 该字段是判定 AI 的核心证据，但其 toString 恒为类名（DisclaimergeMessage），
+        // 看不到实际声明文字 —— 无法判断某条放行项究竟是「AI 声明漏判」还是
+        // 「虚构演绎声明正确放行」。probe13 有 5 条带声明却被放行，正是卡在这里。
+        // 这段把 content 值与 isAi 判定一并拼进 dump，deep 行即可直接读出结论。
+        try {
+            val dis = Reflect.readAny(ent, "mDisclaimergeMessageV2")
+                ?: Reflect.readAny(qp, "mDisclaimergeMessageV2")
+                ?: cm?.let { Reflect.readAny(it, "mDisclaimergeMessageV2") }
+            if (dis != null) {
+                val c = try { Reflect.readAny(dis, "content") as? String } catch (_: Throwable) { null }
+                sb.append(",disContent=\"").append(c?.take(26) ?: "<null>").append('"')
+                sb.append(",disIsAi=").append(AI_DISCLAIMER_REGEX.containsMatchIn(c ?: ""))
+            }
+        } catch (_: Throwable) {}
         // 实体 + PhotoMeta + QPhoto
         for (o in listOf(ent, cm, qp)) {
             if (o == null) continue

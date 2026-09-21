@@ -265,6 +265,19 @@ object CfhDecide {
                 if (pm != null) {
                     val aiKeys = CfhUtil.dumpKVFilter(pm, "ai")
                     if (aiKeys.isNotEmpty()) sb.append(" | pmAi=").append(aiKeys)
+                    // ★★ 放行项也必须留下声明原文（2026-09 排查「开头漏网一直在」）：
+                    // dumpKVFilter 只打字段名+toString（恒为类名 DisclaimergeMessage），
+                    // 看不到声明文字。此处补打 content 值与 isAi 判定 —— 由此可判
+                    // 某条放行项是「AI 声明漏判」还是「虚构演绎声明正确放行」，
+                    // 这是区分「真漏网」与「正常放行」的唯一证据。
+                    try {
+                        val disD = Reflect.readAny(pm, "mDisclaimergeMessageV2")
+                        if (disD != null) {
+                            val cd = try { Reflect.readAny(disD, "content") as? String } catch (_: Throwable) { null }
+                            sb.append(" | disContent=\"").append(cd?.take(26) ?: "<null>")
+                                .append("\" disIsAi=").append(CfhUtil.isAiDisclaimerText(cd))
+                        }
+                    } catch (_: Throwable) {}
                 }
                 val vmIdx = Reflect.readAny(ent, "mVideoModel")
                 if (vmIdx != null) sb.append(" | vm").append(CfhUtil.dumpKV(vmIdx))
@@ -443,7 +456,27 @@ object CfhDecide {
         // ★ 裸实体兜底：LiveStreamFeed 直接作列表元素时无 mEntity 字段（实测 03:45 24批次
         // 全放行直通上屏），ent 取 qp 自身让 live:entCls 类名判定照常工作
         val ent = Reflect.readAny(qp, "mEntity") ?: qp
-        if (CfhState.quickDebugCount < 10) { CfhState.quickDebugCount++; val aiOn = Prefs.bool(Prefs.K_FLT_AI, false); val pm = Reflect.readAny(ent, "mPhotoMeta"); val dis = try { Reflect.readAny(pm, "mDisclaimergeMessageV2") } catch (_: Throwable) { null }; val disC = if (dis != null) try { Reflect.readAny(dis, "content") as? String } catch (_: Throwable) { null } else null; Logger.d("QDBG aiOn=$aiOn hasDis=${dis != null} disC=$disC") }
+        // ★ 启动窗全量探针（2026-09 用户报「一直在，一般在前几条」）：
+        // 原为 quickDebugCount<10 限次，导致首批 9 条之后的判定真值完全不可见 ——
+        // 用户看到的漏网项恰好落在盲区里，无法确认「是声明缺字段」还是「判据没覆盖」。
+        // 改为冷启 20s 内全打（always 级），并补齐定位漏网所需的关键指纹：
+        // 类名/声明文字/直播内层真信号/pager 类名，一条日志即可判断该走哪条规则。
+        run {
+            val inBootWin = CfhState.processStartAt > 0L && System.currentTimeMillis() - CfhState.processStartAt < 20_000L
+            if (inBootWin || CfhState.quickDebugCount < 10) {
+                CfhState.quickDebugCount++
+                val aiOn = Prefs.bool(Prefs.K_FLT_AI, false)
+                val pm = Reflect.readAny(ent, "mPhotoMeta")
+                val dis = try { Reflect.readAny(pm, "mDisclaimergeMessageV2") } catch (_: Throwable) { null }
+                val disC = if (dis != null) try { Reflect.readAny(dis, "content") as? String } catch (_: Throwable) { null } else null
+                val lm = try { Reflect.readAny(ent, "mLivePlaybackMeta") } catch (_: Throwable) { null }
+                Logger.always("QDBG aiOn=$aiOn ent=${ent.javaClass.simpleName} hasDis=${dis != null} disC=$disC " +
+                    "liveMeta=${lm != null} liveStart=${lm?.let { CfhUtil.safeNextLong(it, "mLiveStartTime") } ?: 0} " +
+                    "shopLive=${lm?.let { Reflect.readBool(it, "mShopLive") } ?: false} " +
+                    "living=${pm?.let { Reflect.readBool(it, "mCurrentLivingState") } ?: false} " +
+                    "cap=\"${CfhUtil.readCaption(qp)?.take(22)}\"")
+            }
+        }
         // ★ 直播：ent 类名含 Live 即拦（纯类名检查微秒级，与 advideo:mAd 同级）。
         // 实证 02:36 LADUMP {LiveStreamFeed=3} 批次 del 只带走 AI/广告、3 条直播全部放行
         // ——直播此前不在 quick 路径，后台补剔又晚于 pager 构造，致精选tab直播上屏

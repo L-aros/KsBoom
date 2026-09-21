@@ -219,7 +219,15 @@ object CfhWatch {
     fun laFind(force: Boolean = false) {
         if (CfhState.liveTop) return
         val now = System.currentTimeMillis()
-        if (!force && now - CfhState.laFindAt < 2500) return
+        // ★★ 启动窗内放宽节流（实证 2026-09 probe16 用户报「南方小果/广西黑皮水果甘蔗
+        // 第二条一直停在原位不动」）：rerank 的 selected/scroll 回调是直播注入的必经点，
+        // 原实现每次只调 laFind() 且被 2500ms 节流吞掉 —— 而 LAWATCH（真源监控）在
+        // 00.539 才武装，直播内容 00.448 已上屏（早 91ms），中间这段真空期里
+        // 数据源删了 30+ 次、屏幕纹丝不动。
+        // 冷启前 20s 内把节流收紧到 250ms，让 rerank 回调触发的清洗真正落地。
+        val bootWin = CfhState.processStartAt > 0L && now - CfhState.processStartAt < 20_000L
+        val throttle = if (bootWin) 250L else 2500L
+        if (!force && now - CfhState.laFindAt < throttle) return
         CfhState.laFindAt = now
         val targets = synchronized(CfhState.retDelQp) { CfhState.retDelQp.toList().filterNotNull() }
         // ★ force（rerank.d.j 预判前方有直播触发）时 targets 空也扫：直播卡可能未经
