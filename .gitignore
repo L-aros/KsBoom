@@ -82,8 +82,5 @@ _ks/
 # 设计稿（内部）
 设计/
 
-# LSPosed 官方 API 库（编译依赖，本地保留，不入库）
-app/libs/*.jar
-
 # 模块运行时配置镜像（真身在 /sdcard/Android/media/<包名>/，属运行产物）
 slowkick.properties
