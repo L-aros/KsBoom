@@ -30,37 +30,158 @@ object DownloadService {
     private val seq = java.util.concurrent.atomic.AtomicInteger(100)
     private const val MAX_IMG_BYTES = 30L * 1024 * 1024
 
+    // ==================== 下载队列（功能 7，2026-09） ====================
+
+    /** 队列项：一个待执行/进行中的下载任务 */
+    class DlTask(
+        val id: Int,
+        val title: String,
+        val run: (Context) -> Unit
+    ) {
+        @Volatile var state: Int = STATE_QUEUED   // 0=排队 1=下载中 2=完成 3=失败
+    }
+
+    const val STATE_QUEUED = 0
+    const val STATE_RUNNING = 1
+    const val STATE_DONE = 2
+    const val STATE_FAILED = 3
+
+    /**
+     * 串行下载队列。
+     *
+     * **为什么需要**：原实现每个下载各自起线程并发跑（`thread(name="MJ-DL")`），
+     * 同时下多条会争抢带宽、并且多线程同时写同一目录时的进度通知会互相覆盖。
+     * 改为**串行执行**：一次只下一个，其余排队，通知里显示队列位置。
+     *
+     * 用单线程执行器而非"起线程 + 自己锁"，是因为它天然保证串行且无需手写锁；
+     * 任务本身内部仍会起工作线程做 IO，这里只控制**调度顺序**。
+     */
+    private val queueExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "MJ-DLQueue").apply { isDaemon = true }
+    }
+    private val pending = java.util.concurrent.CopyOnWriteArrayList<DlTask>()
+    private val queueSeq = java.util.concurrent.atomic.AtomicInteger(1)
+
+    /** 当前是否有下载在跑 / 排队中（供 UI 显示） */
+    val isBusy: Boolean get() = pending.isNotEmpty()
+
+    /** 队列快照（供「下载队列」页展示）：[标题, 状态] */
+    fun queueSnapshot(): List<Pair<String, Int>> = pending.map { it.title to it.state }
+
+    /** 取消一个仍在排队（未开始）的任务 */
+    fun cancelQueued(id: Int): Boolean {
+        val t = pending.firstOrNull { it.id == id && it.state == STATE_QUEUED } ?: return false
+        pending.remove(t)
+        return true
+    }
+
+    /** 清空仍在排队的任务（不影响正在下载的） */
+    fun clearQueued(): Int {
+        val victims = pending.filter { it.state == STATE_QUEUED }
+        pending.removeAll(victims)
+        return victims.size
+    }
+
+    /**
+     * 入队并调度。任务按提交顺序串行执行。
+     *
+     * @param title 队列中显示的名称（通常为文件名）
+     * @param body  实际下载动作 —— 在**轮到它时**才执行
+     */
+    private fun enqueue(ctx: Context, title: String, body: (Context) -> Unit) {
+        val task = DlTask(queueSeq.getAndIncrement(), title) { c -> body(c) }
+        pending.add(task)
+        val pos = pending.count { it.state == STATE_QUEUED }
+        if (pos > 1) toast(ctx, "已加入队列（第 $pos 位）: $title")
+        queueExecutor.execute {
+            try {
+                task.state = STATE_RUNNING
+                showQueueNotification(ctx)
+                body(ctx)
+                task.state = STATE_DONE
+            } catch (t: Throwable) {
+                task.state = STATE_FAILED
+                Logger.d("DL queue task fail: ${t.message}")
+            } finally {
+                pending.remove(task)
+                showQueueNotification(ctx, done = true)
+            }
+        }
+    }
+
+    /**
+     * 队列总览通知（固定 id）：显示「正在下载 X，还有 N 个排队」。
+     *
+     * 与每条下载自己的进度通知（id 由 [seq] 分配）并存 —— 前者是总览，后者是明细。
+     */
+    private const val QUEUE_NOTI_ID = 90
+    private fun showQueueNotification(ctx: Context, done: Boolean = false) {
+        try {
+            val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (Build.VERSION.SDK_INT >= 26) {
+                nm.createNotificationChannel(NotificationChannel(CH, "下载", NotificationManager.IMPORTANCE_LOW))
+            }
+            if (done && pending.isEmpty()) {
+                nm.cancel(QUEUE_NOTI_ID)
+                return
+            }
+            val running = pending.firstOrNull { it.state == STATE_RUNNING }
+            val queued = pending.count { it.state == STATE_QUEUED }
+            val text = buildString {
+                if (running != null) append("正在下载: ").append(running.title)
+                if (queued > 0) {
+                    if (isNotEmpty()) append("  ·  ")
+                    append("排队 ").append(queued).append(" 个")
+                }
+            }
+            val n = NotificationCompat.Builder(ctx, CH)
+                .setContentTitle("ManJiao 下载队列")
+                .setContentText(text.ifBlank { "空闲" })
+                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setOngoing(pending.isNotEmpty())
+                .setProgress(0, 0, false)
+                .build()
+            nm.notify(QUEUE_NOTI_ID, n)
+        } catch (_: Throwable) {}
+    }
+
     fun downloadVideo(ctx: Context, info: VideoInfo, dir: String) {
         val candidates = mutableListOf<String>()
         info.bestRepUrl()?.let { candidates.add(it); Logger.d("DL use bestRep: $it") }
         info.url?.let { if (it !in candidates) candidates.add(it) }
         info.domainUrl?.let { if (it !in candidates) candidates.add(it) }
+        // ★ 分类落盘（2026-09 用户要求）：视频进 <专属目录>/视频/
+        val outDir = StorageDirs.ensure(StorageDirs.videoDir(dir)).absolutePath
         // ★ always 级（排障）：下载是低频用户操作，整条链路必须不受日志静默影响
-        Logger.always("DLREQ video dir=$dir urls=${candidates.size} url=${info.url?.take(50)} rep=${info.repUrls.size} img=${info.imageUrls.size}")
-        download(ctx, candidates, info.videoFileName(), dir, info, false)
+        Logger.always("DLREQ video dir=$outDir urls=${candidates.size} url=${info.url?.take(50)} rep=${info.repUrls.size} img=${info.imageUrls.size}")
+        download(ctx, candidates, info.videoFileName(), outDir, info, false)
     }
 
     fun downloadAudio(ctx: Context, info: VideoInfo, dir: String) {
         val candidates = mutableListOf<String>()
         (info.audioUrl ?: info.url)?.let { candidates.add(it) }
         info.domainUrl?.let { if (it !in candidates) candidates.add(it) }
-        Logger.always("DLREQ audio dir=$dir urls=${candidates.size} audioUrl=${info.audioUrl?.take(50)}")
-        download(ctx, candidates, info.audioFileName(), dir, info, true)
+        // ★ 分类落盘：音频进 <专属目录>/音频/
+        val outDir = StorageDirs.ensure(StorageDirs.audioDir(dir)).absolutePath
+        Logger.always("DLREQ audio dir=$outDir urls=${candidates.size} audioUrl=${info.audioUrl?.take(50)}")
+        download(ctx, candidates, info.audioFileName(), outDir, info, true)
     }
 
     fun downloadImages(ctx: Context, info: VideoInfo, dir: String) {
         val urls = info.imageUrls
-        Logger.always("DLREQ images dir=$dir urls=${urls.size}")
+        // ★ 分类落盘：图集进 <专属目录>/图集/<作品名>/
+        val imgRoot = StorageDirs.ensure(StorageDirs.imageDir(dir)).absolutePath
+        Logger.always("DLREQ images dir=$imgRoot urls=${urls.size}")
         if (urls.isEmpty()) { toast(ctx, "未捕获到图集图片"); return }
         val base = info.baseName()
-        val guardKey = File(dir, base).absolutePath
+        val guardKey = File(imgRoot, base).absolutePath
         if (!active.add(guardKey)) { toast(ctx, "该图集已在下载中"); return }
         toast(ctx, "开始下载图集: $base (${urls.size}张)")
         val nid = seq.incrementAndGet()
         notify(ctx, nid, "准备下载图集: $base", -1)
         thread(name = "MJ-DL-IMG", isDaemon = true) {
             try {
-                val outDir = File(dir, base)
+                val outDir = StorageDirs.ensure(File(imgRoot, base))
                 outDir.mkdirs()
                 var done = 0
                 var failed = 0
@@ -85,7 +206,9 @@ object DownloadService {
                     }
                 }
                 if (done == 0) { notify(ctx, nid, "图集下载失败", -2); toast(ctx, "图集下载失败"); return@thread }
-                saveMeta(dir, base, info)
+                // ★ 图集元信息写进**该作品自己的子目录**（不是图集根目录）：
+                // 图片在 outDir 里，元信息跟着图片放才找得到
+                saveMeta(outDir.absolutePath, base, info)
                 val suffix = if (failed > 0) "，失败$failed 张" else ""
                 notify(ctx, nid, "图集完成: $base ($done/${urls.size}张$suffix)", 100)
                 toast(ctx, "图集下载完成: $base ($done/${urls.size}张$suffix)")
@@ -146,14 +269,26 @@ object DownloadService {
             while (File(dir, "$stem($n)$ext").exists() && n < 100) n++
             outName = "$stem($n)$ext"
         }
-        val guardKey = File(dir, outName).absolutePath
+        // ★ 队列化（功能 7，2026-09）：并入串行队列，轮到时才真正开始下载。
+        // 文件名/去重键在**入队时**就定下来（而非轮到时），保证队列里显示的名字
+        // 与实际落盘名一致；active 去重同样在入队时占位，防同名重复入队。
+        val finalName = outName
+        val guardKey = File(dir, finalName).absolutePath
         if (!active.add(guardKey)) { toast(ctx, "该文件已在下载中"); return }
+        enqueue(ctx, finalName) { c -> runDownload(c, urls, finalName, dir, info, audio, guardKey) }
+    }
+
+    /** 实际的下载执行体（由队列在轮到该任务时调用） */
+    private fun runDownload(
+        ctx: Context, urls: List<String>, nameIn: String, dir: String,
+        info: VideoInfo, audio: Boolean, guardKey: String
+    ) {
         val nid = seq.incrementAndGet()
-        toast(ctx, "开始下载: $outName")
-        notify(ctx, nid, "准备下载: $outName", -1)
-        thread(name = "MJ-DL", isDaemon = true) {
-            try {
+        toast(ctx, "开始下载: $nameIn")
+        notify(ctx, nid, "准备下载: $nameIn", -1)
+        try {
                 File(dir).mkdirs()
+                var outName = nameIn
                 var out = File(dir, outName)
                 val tmp = File(dir, "$outName.tmp")
                 var success = false
@@ -204,7 +339,7 @@ object DownloadService {
                     // 0 字节残留清掉防堆积
                     if (tmp.exists() && tmp.length() == 0L) tmp.delete()
                     Logger.always("DL ALLFAIL out=$outName lastErr=$lastErr")
-                    notify(ctx, nid, "失败: $lastErr", -2); toast(ctx, "下载失败: $lastErr"); return@thread
+                    notify(ctx, nid, "失败: $lastErr", -2); toast(ctx, "下载失败: $lastErr"); return
                 }
 
                 // ★ MP4 魔数校验（2026-09「播放不了」）：无签名源链常返回 403/HTML 页面，
@@ -222,7 +357,7 @@ object DownloadService {
                     Logger.always("DL BADMAGIC out=$outName")
                     notify(ctx, nid, "失败: 链接无效或需签名", -2)
                     toast(ctx, "下载失败：链接失效或需签名")
-                    return@thread
+                    return
                 }
 
                 if (audio && info.audioUrl == null) {
@@ -235,7 +370,7 @@ object DownloadService {
                     if (!out.exists() || out.length() == 0L) {
                         notify(ctx, nid, "失败: 未能提取音轨", -2)
                         toast(ctx, "音频提取失败（未找到音轨）")
-                        return@thread
+                        return
                     }
                 } else {
                     // ★ renameTo 在目标已存在时静默失败（返回 false 不抛异常），
@@ -280,7 +415,6 @@ object DownloadService {
             } finally {
                 active.remove(guardKey)
             }
-        }
     }
 
     private fun toast(ctx: Context, msg: String) {

@@ -17,20 +17,23 @@ import java.net.URL
 object VideoDownloaderHook {
 
     fun hook(xp: XposedInterface, cl: ClassLoader) {
-        // ★ 安装标记 always 级（排障 2026-09 01:42）：捕获全空但无任何失败痕迹——
-        // 静默模式吞掉了全部安装日志。下载链路每个子钩子的就绪状态必须可见
-        try { hookPlayer(xp, cl); Logger.always("DLHOOK player ok") } catch (t: Throwable) { Logger.always("DLHOOK player FAIL: ${t.javaClass.simpleName}: ${t.message}") }
-        try { hookDetail(xp, cl); Logger.always("DLHOOK detail ok") } catch (t: Throwable) { Logger.always("DLHOOK detail FAIL: ${t.javaClass.simpleName}: ${t.message}") }
-        try { hookOkHttp(xp, cl); Logger.always("DLHOOK okhttp ok") } catch (t: Throwable) { Logger.always("DLHOOK okhttp FAIL: ${t.javaClass.simpleName}: ${t.message}") }
-        try { hookAllOnResume(xp, cl); Logger.always("DLHOOK allonresume ok") } catch (t: Throwable) { Logger.always("DLHOOK allonresume FAIL: ${t.javaClass.simpleName}: ${t.message}") }
-        try { hookUrlConstructor(xp, cl); Logger.always("DLHOOK urlctor ok") } catch (t: Throwable) { Logger.always("DLHOOK urlctor FAIL: ${t.javaClass.simpleName}: ${t.message}") }
+        // ★ 安装标记（排障 2026-09 01:42）：捕获全空但无任何失败痕迹——
+        // 静默模式吞掉了全部安装日志。下载链路每个子钩子的就绪状态必须可见。
+        // ★ 性能修复（审阅 2026-09 · M1）：always → once——既保留「静默模式下也可见」
+        // 的排障能力，又保证每进程只打一行（原先 these 每次 hook() 都全打一遍，
+        // 而 hook() 在重复初始化路径上可能被多次调用）
+        try { hookPlayer(xp, cl); Logger.once("dl.player", "DLHOOK player ok") } catch (t: Throwable) { Logger.once("dl.player", "DLHOOK player FAIL: ${t.javaClass.simpleName}: ${t.message}") }
+        try { hookDetail(xp, cl); Logger.once("dl.detail", "DLHOOK detail ok") } catch (t: Throwable) { Logger.once("dl.detail", "DLHOOK detail FAIL: ${t.javaClass.simpleName}: ${t.message}") }
+        try { hookOkHttp(xp, cl); Logger.once("dl.okhttp", "DLHOOK okhttp ok") } catch (t: Throwable) { Logger.once("dl.okhttp", "DLHOOK okhttp FAIL: ${t.javaClass.simpleName}: ${t.message}") }
+        try { hookAllOnResume(xp, cl); Logger.once("dl.allonresume", "DLHOOK allonresume ok") } catch (t: Throwable) { Logger.once("dl.allonresume", "DLHOOK allonresume FAIL: ${t.javaClass.simpleName}: ${t.message}") }
+        try { hookUrlConstructor(xp, cl); Logger.once("dl.urlctor", "DLHOOK urlctor ok") } catch (t: Throwable) { Logger.once("dl.urlctor", "DLHOOK urlctor FAIL: ${t.javaClass.simpleName}: ${t.message}") }
         // ★ dex 全量枚举后台化（流畅度）：hookRepresentations 遍历 dexElements 的全部
         // 类名（几十万 entry 的字符串枚举）是模块注入期主线程最大开销之一——冷启动
         // 掉帧/ANR 风险点。挪到后台 daemon 线程，rep 捕获晚几百毫秒就绪无感知
         Thread {
-            try { hookRepresentations(xp, cl) } catch (t: Throwable) { Logger.always("DLHOOK rep FAIL: ${t.javaClass.simpleName}: ${t.message}") }
+            try { hookRepresentations(xp, cl) } catch (t: Throwable) { Logger.once("dl.rep", "DLHOOK rep FAIL: ${t.javaClass.simpleName}: ${t.message}") }
         }.apply { name = "MJ-RepScan"; isDaemon = true }.start()
-        Logger.always("DLHOOK installed")
+        Logger.once("dl.installed", "DLHOOK installed")
     }
 
     private fun hookRepresentations(xp: XposedInterface, cl: ClassLoader) {
@@ -158,8 +161,16 @@ object VideoDownloaderHook {
                 }
             }
         }
-        for (cn in arrayOf("com.kwai.player.KwaiPlayer", "com.kwai.player.AemonPlayer", "com.kuaishou.player.KwaiPlayer")) {
-            val c = Reflect.findClass(cn, cl) ?: continue
+        // ★ 版本自适应（2026-09）：播放器类候选。
+        // 原写法是三个硬编码候选名（`com.kwai.player.KwaiPlayer` 等），
+        // 而《快手版本适配文档》2.2 节实测三候选里两个 MISS——快手已把播放器
+        // 统一到 `com.kwai.player` 命名空间并重构过类名，候选数组不可持续。
+        //
+        // 现走 KsResolve：先在**已知命名空间**内按「有 setDataSource(String/Uri) 的类」
+        // 结构发现，再回退到既有候选名顺序（保证旧版本行为完全一致）。
+        val playerCandidates = io.github.angbang852.manjiao.adapt.KsResolve.resolvePlayerClasses(cl)
+        for (c in playerCandidates) {
+            val cn = c.name
             for (m in c.declaredMethods) {
                 if (m.parameterTypes.size != 1) continue
                 val pt = m.parameterTypes[0]

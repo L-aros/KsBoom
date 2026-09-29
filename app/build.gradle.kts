@@ -60,6 +60,27 @@ android {
     kotlinOptions { jvmTarget = "17" }
 }
 
+/**
+ * 版本自适应逻辑的离线验证台（开发期用，不进产物）。
+ *
+ * 跑的是 app 模块**已编译**的 AdaptVerify.main —— 用真实实现断言，
+ * 避免「测试副本与实现漂移」。见 `adapt/AdaptVerify.kt` 的说明。
+ *
+ * 用法：`gradlew :app:adaptVerify`
+ */
+tasks.register<JavaExec>("adaptVerify") {
+    group = "verification"
+    description = "验证版本自适应逻辑（档位映射 / 结构特征匹配 / 版本名解析）"
+    dependsOn("compileDebugKotlin")
+    // 用 debug 变体的 classes + 运行时依赖（含 kotlin-stdlib）
+    val debugVariant = "debug"
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/$debugVariant"),
+        configurations.getByName("${debugVariant}RuntimeClasspath")
+    )
+    mainClass.set("io.github.angbang852.manjiao.adapt.AdaptVerify")
+}
+
 dependencies {
     compileOnly(files("libs/libxposed-api-102.0.0.jar"))
     implementation(files("libs/libxposed-interface-102.0.0.jar"))
@@ -70,8 +91,18 @@ dependencies {
     implementation("org.luckypray:dexkit:2.2.0")
 
     implementation("androidx.core:core-ktx:1.13.1")
+    // AppCompat：SettingsActivity 继承 AppCompatActivity（Manifest 的
+    // Theme.SlowKick 亦继承 MaterialComponents，二者都需要）
     implementation("androidx.appcompat:appcompat:1.7.0")
+    // ★ 依赖清理（审阅 2026-09 · L1）：仅移除 preference-ktx —— 全项目零引用
+    //（设置页是自绘面板，未用 PreferenceFragment/PreferenceScreen）。
+    //
+    // ★ recyclerview 经实测**不能移除**：`material:1.12.0` 传递依赖
+    //   androidx.recyclerview:1.0.0 + androidx.viewpager2:1.0.0，
+    //   移除后离线构建立刻失败（checkReleaseAarMetadata 无法解析这两个传递依赖）。
+    //   代码里确实没用 RecyclerView（grep 仅 3 处命中，全是注释），
+    //   但它由 Material 主题链条带入，属于「被动依赖」——要真去掉得连 Material 一起换掉主题，
+    //   收益（少量 dex）不抵风险，故保留。
     implementation("androidx.recyclerview:recyclerview:1.3.2")
-    implementation("androidx.preference:preference-ktx:1.2.1")
     implementation("com.google.android.material:material:1.12.0")
 }

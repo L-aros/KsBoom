@@ -20,6 +20,15 @@ object Prefs {
     const val OWN_PKG = "io.github.angbang852.manjiao"
     private const val MEDIA_DIR = "/sdcard/Android/media/io.github.angbang852.manjiao"
     private const val MEDIA_FILE = "$MEDIA_DIR/slowkick.properties"
+
+    /**
+     * 跨进程可写目录（公开常量）。
+     *
+     * 快手进程与模块进程都能读写这里，是两者之间**唯一**稳定可达的落盘位置：
+     * 模块私有目录跨包不可达（scoped storage），宿主私有目录模块 app 也读不到。
+     * [io.github.angbang852.manjiao.data.AuditMirror] 复用同一目录。
+     */
+    const val MEDIA_DIR_PUBLIC = MEDIA_DIR
     private const val PULL_INTERVAL_MS = 2000L
     private const val QUERY_INTERVAL_MS = 30000L
     private const val QUERY_INTERVAL_SLOW = 300000L
@@ -51,16 +60,48 @@ object Prefs {
     const val K_FLT_IMAGE = "flt_image"
     const val K_FLT_LIVE = "flt_live"
     const val K_FLT_AI = "flt_ai"
+    /** ★★★ 疑似AI声明独立开关（v13.24，50388 适配）：
+     * 快手 50388 对大量普通内容也填了「疑似含AI生成内容」声明
+     * （V2PROBE 实证：城也萧何/今朝体育/马上资讯全带此标记）。
+     * 「疑似」是普适合规标记，不能和「确定 AI」混为一谈。
+     * 默认 true = 保持拦截（与原行为一致）；关掉则放行「疑似」内容。 */
+    const val K_FLT_AI_SUSPECT = "flt_ai_suspect"
     const val K_FLT_EC = "flt_ec"
     const val K_FLT_LIKE_ON = "flt_like_on"
     const val K_FLT_LIKE_TH = "flt_like_th"
     const val K_FLT_KEYWORDS = "flt_keywords"
     const val K_FLT_KW_ON = "flt_kw_on"
-    const val K_FLT_NOMORE = "flt_nomore"
+    /**
+     * ★★★ 白名单模式开关（2026-09-26 用户定稿「判正常才放行」）。
+     *
+     * **语义反转**：开启后走白名单 —— 只放行**明确判为干净**的条目；
+     * 判脏直接挡下；文案/昵称/标识未齐的**暂扣等齐**（3 秒超时兜底）。
+     *
+     * **默认 false** —— 不改变既有黑名单行为。
+     * 这是高风险开关（可能造成「无更多作品」），必须真机观察后再考虑默认开。
+     *
+     * 开启方式（adb）：
+     * ```
+     * adb shell am broadcast -a io.github.angbang852.manjiao.PREFS_WRITE \
+     *   -p io.github.angbang852.manjiao --es type bool \
+     *   --es key flt_whitelist --ez value true
+     * ```
+     */
+    const val K_FLT_WHITELIST = "flt_whitelist"
     /** ★ 首次进主页自动刷新一次（BOOTFLUSH，2026-09 用户要求做成开关）：
      *  原为无条件行为。关掉可 A/B 对比「首屏刷新是否反而把脏内容带进来」。
      *  默认 true = 保持原行为不变。 */
     const val K_FLT_BOOTFLUSH = "flt_bootflush"
+    /** ★★★ 首页内容池接精选页（2026-09-28 用户方案，v13.5+）：
+     *  精选页内容池被 AI 短剧塞满（拦截后空池转圈），从**首页发现页**
+     *  拉干净内容进共享池，精选页空池时自动补位续上。
+     *  开启时：hook 首页请求器（kik.o0 → bai.a），精选页本批几乎全拦时
+     *  主动触发首页 load() 拉发现页数据 → HomeFeedResponse 登记干净池 →
+     *  下一批精选页清洗时补位。
+     *  关闭时：不 hook 请求器、不登记池、不补位，回到快手原生行为
+     *  （精选页转圈或拉到脏内容）。
+     *  默认 true = 保持 v13.11 用户实测「好像可以」的行为。 */
+    const val K_FLT_HOMEREFILL = "flt_homerefill"
 
 
     // 性能优化
@@ -70,15 +111,30 @@ object Prefs {
     const val K_PERF_QUIET = "perf_quiet"
     const val K_PERF_SENSOR = "perf_sensor"
     const val K_PERF_LOGSPAM = "perf_logspam"
+    /** ★ 深度取证开关（审阅 2026-09 · M7）：LAWATCH 真源写监控（前置删除）。
+     *  默认 **false**——它会按运行时类给宿主的 COW 列表写入装 hook，属高风险取证插桩，
+     *  必须在明确排障时才开。与 perf_quiet 解耦：开普通诊断日志不再触发它。
+     *  关闭时功能不丢，退化为 filterVmLists 的周期性清洗（落地后摘除）。 */
+    const val K_PERF_LAWATCH = "perf_lawatch"
     // ★ 诊断日志独立开关（S2 2026-09）：与 quiet 解耦，开诊断不拖垮性能
     const val K_DIAG = "diag_debug"
+
+    // ==================== 拦截审计（功能 4/5/6，2026-09） ====================
+    /** 拦截记录开关：记录每条被拦内容的证据，供「拦截记录」页回看并标记误拦。
+     *  默认 **false** —— 逐条记录有微量常驻开销，需要排查时才开。 */
+    const val K_AUDIT_ON = "audit_on"
+    /** 拦截记录保留条数（20..1000），越多越占内存（每条约 200 字节） */
+    const val K_AUDIT_LIMIT = "audit_limit"
+    /** 规则命中反馈总开关：标注「近期零命中」的规则，帮用户关掉无效规则 */
+    const val K_AUDIT_FEEDBACK = "audit_feedback"
 
     // 手势功能
     const val K_GS_NO_DBL_LIKE = "gs_no_dbl_like"
     const val K_GS_OPEN_COMMENT = "gs_open_comment"
-    const val K_GS_OPEN_COMMENT_TAPS = "gs_open_comment_taps"
     const val K_GS_OPEN_MENU = "gs_open_menu"
-    const val K_GS_OPEN_MENU_TAPS = "gs_open_menu_taps"
+    // ★ K_GS_OPEN_COMMENT_TAPS / K_GS_OPEN_MENU_TAPS 已删除（2026-09）：三击功能废弃。
+    //   两键从无任何 UI 入口（值恒为默认 2），GestureHook 中对应的 `== 3` 分支
+    //   一并移除 —— 保留常量只会让后来者以为存在三击可配。
 
     // 播放控制
     const val K_PB_NO_LOOP = "pb_no_loop"
@@ -116,6 +172,17 @@ object Prefs {
             if (remote) {
                 rsp = ctx.getSharedPreferences(REMOTE_SP, Context.MODE_PRIVATE)
                 pullRemote(force = true)
+                // ★ 性能修复（审阅 2026-09 · M2）：getter 不再驱动同步（见 bool/str 注释），
+                // 改为在目标进程内起一个低频守护线程驱动 —— 与原语义一致（仍受
+                // PULL_INTERVAL_MS 限频），但不再把 syscall 摊到每一次开关读取上。
+                // 5 秒一轮：配置主通道是广播（applyRemote 即时生效），
+                // 本线程只是「广播丢失时的兜底」，无需更密。
+                Thread {
+                    while (true) {
+                        try { Thread.sleep(5000) } catch (_: Throwable) { break }
+                        try { schedulePull() } catch (_: Throwable) {}
+                    }
+                }.also { it.isDaemon = true; it.name = "MJ-PrefsTick" }.start()
                 // media 不可达时用快手本地 SP 恢复上次配置（用户在快手菜单里改过的开关
                 // 重启后不再丢失）
                 if (cache == null || cache!!.isEmpty()) {
@@ -214,6 +281,16 @@ object Prefs {
         val now = System.currentTimeMillis()
         // 性能优化-低频同步：默认 5 分钟一次。30 秒周期在多进程下是广播风暴
         // （N 进程 × 每进程一条 query × 模块 app 回发全部键 × 全部进程再各收一遍）
+        // ★★ 已按用户裁定回退（2026-09-29）。
+        //   经过：本轮"默认值统一为关"时，本行曾被顺手改成 `!= true`
+        //   （= 未设置也走 30 秒），理由是"与 UI 口径一致"。
+        //   用户否掉，理由成立：干净安装下配置广播会变成 **30 秒周期** ——
+        //   而这正是上方注释里点名的「广播风暴」：N 进程 × 每进程一条 query ×
+        //   模块 app 回发全部键 × 全部进程再各收一遍。那是**净增加的流量与唤醒**，
+        //   与「默认关」带来的收益完全不成比例（性能域不该跟着过滤域的语义走）。
+        //   ⇒ 恢复原语义：**只有显式存 false 才走 30 秒；未设置视为低频（5 分钟）**。
+        //   注：本行是整个改动里**唯一**动到"默认值以外语义"的地方，现已还原；
+        //      其余全部改动都严格只改 `def` 字面量，不影响任何判定结果。
         val interval = if (cache?.get(K_PERF_LOWFREQ) == false) QUERY_INTERVAL_MS else QUERY_INTERVAL_SLOW
         if (now - lastQuery < interval) return
         lastQuery = now
@@ -338,20 +415,37 @@ object Prefs {
     }
 
     fun bool(key: String, def: Boolean): Boolean {
-        if (remote) { schedulePull(); return cache?.get(key) as? Boolean ?: def }
+        if (remote) return cache?.get(key) as? Boolean ?: def
         return sp?.getBoolean(key, def) ?: def
     }
     fun str(key: String, def: String): String {
-        if (remote) { schedulePull(); return cache?.get(key) as? String ?: def }
+        if (remote) return cache?.get(key) as? String ?: def
         return sp?.getString(key, def) ?: def
     }
     fun int(key: String, def: Int): Int {
-        if (remote) { schedulePull(); return cache?.get(key) as? Int ?: def }
+        if (remote) return cache?.get(key) as? Int ?: def
         return sp?.getInt(key, def) ?: def
     }
     fun strSet(key: String): Set<String> {
-        if (remote) { schedulePull(); return cache?.get(key) as? Set<String> ?: emptySet() }
+        if (remote) return cache?.get(key) as? Set<String> ?: emptySet()
         return sp?.getStringSet(key, emptySet()) ?: emptySet()
+    }
+
+    /**
+     * 周期性后台同步（性能修复 审阅 2026-09 · M2）。
+     *
+     * **原实现的问题**：四个 getter 每个都调 `schedulePull()`，而它内部要
+     * `System.currentTimeMillis()`（syscall）+ 2 秒限频判断。`CfhDecide.feedRules`
+     * 单次判定就调 8 次 getter、`ImmersiveHook` 单轮 17 次 —— 这些全在 hook
+     * 热路径上，"每次只多一点"但每秒数千次累积成实打实的主线程税。
+     *
+     * **改法**：getter 回归纯内存读（零 syscall）；后台同步改由本函数在
+     * **明确的时机**驱动（Activity onResume / 菜单打开 / 配置变更后），
+     * 而不是挂在每个 getter 上。语义不变——同步频率上限仍是 PULL_INTERVAL_MS。
+     */
+    fun tickSync() {
+        if (!remote) return
+        schedulePull()
     }
 
     private fun ed(): SharedPreferences.Editor? = sp?.edit()

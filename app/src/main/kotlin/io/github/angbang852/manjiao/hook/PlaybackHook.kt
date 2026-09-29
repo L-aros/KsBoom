@@ -13,22 +13,99 @@ import io.github.libxposed.api.XposedInterface
 object PlaybackHook {
 
     @Volatile private var delayedHooked = false
-    @Volatile private var lastCompletionMs = 0L
-    @Volatile private var currentPlayer: Any? = null
     @Volatile private var checkRunning = false
     @Volatile private var mPauseRef: java.lang.reflect.Method? = null
-    // ★ DexKit 播放器发现：xp 引用供异步发现线程 hook 用
+
+    // ==================== 播放器实例状态（2026-09-23 按实例隔离）====================
+    //
+    // ★★ 为什么把「完成时刻」从全局标量改成**按实例记录**（真机缺陷修复）：
+    //
+    //   原实现有两个全局变量：
+    //     `@Volatile var lastCompletionMs: Long`  —— 最近一次播完的时刻
+    //     `@Volatile var currentPlayer: Any?`     —— 最近一次 start 的播放器
+    //
+    //   而实测（快手 14.8.20.50218）有**两条独立路径**都会触发 start 拦截：
+    //     · DexKit 结构发现路径（命中 `aym.b` 等混淆类）
+    //     · 硬编码兜底路径（`com.kwai.video.aemonplayer.AemonMediaPlayer`）
+    //   两个**不同类的实例**交替写同一个全局字段，于是：
+    //
+    //   ① 暂停打在旧实例上 —— 用户看到当前视频「卡在暂停按钮」不动
+    //   ② 用户的「点击播放」被判据 `now - lastCompletionMs < 1000` 拦掉
+    //      —— 而那个时刻来自**另一个视频**，点击因此毫无反应
+    //   ③ 页面重建时取到相邻条目 —— 表现为「滑下去正常、滑回来视频换了」
+    //
+    //   修法：所有「与某次播放有关」的状态都按**播放器实例身份**存储。
+    //   换视频 = 换实例 = 状态天然隔离，旧实例的完成时刻不再影响新实例。
+    //
+    //   用 WeakHashMap 而非强引用：播放器实例由快手持有，模块只做旁挂记录；
+    //   强引用会把已销毁的播放器钉在内存（详情页反复滑动会线性增长）。
+    //   同步包装因为 hook 回调跑在任意线程。
+
+    /** 最近一次 start 的播放器（后台暂停功能用；不再是 noLoop 的判据来源） */
+    @Volatile private var currentPlayer: Any? = null
+
+    // ★ 状态机已外移到 adapt/PlaybackState（2026-09-23）——它持有 WeakHashMap
+    //   且是**纯逻辑**，放在这里会让 AdaptVerify 因 android.os.Handler 无法在
+    //   JVM 加载而跑不起来（NoClassDefFoundError）。外移后「按实例隔离」这条
+    //   不变量有了回归断言，不再只靠真机复现。
+
+    /** 记录某实例的完成时刻 */
+    private fun markCompletion(p: Any) =
+        io.github.angbang852.manjiao.adapt.PlaybackState.markCompletion(p)
+
+    /** 该实例是否在「刚播完的 1 秒窗口」内（只看该实例自己的记录） */
+    private fun justCompleted(p: Any): Boolean =
+        io.github.angbang852.manjiao.adapt.PlaybackState.justCompleted(p)
+
+
+    /**
+     * **旧 noLoop 机制是否还要生效**（2026-09-23）。
+     *
+     * ★ 为什么需要这个开关：新增的 [NoLoopGuard]（基于 `PlayModule` 进度回绕）
+     *   才是 14.8+ 上的正确实现。旧机制（`start` 拦截 + 看门狗轮询）在
+     *   14.8.20.50218 上**从不被调用**，但它**仍然活着** ——
+     *   若两者同时启用，会出现实测到的糟糕现象：
+     *
+     *   ```
+     *   PB-OBS state=Playing   ← 用户点了一下，快手进入播放
+     *   PB-OBS state=Paused    ← 旧看门狗立刻又 pause 回去
+     *   PB-OBS state=Playing
+     *   PB-OBS state=Paused    ...（反复交替）
+     *   ```
+     *   用户观感就是**「要点两下才能播放」**（第 1 下被压回、第 2 下才走）。
+     *
+     *   因此：**新实现装成功时，旧机制整体退场**；新实现不可用（旧版快手
+     *   没有 PlayModule）时才回落到旧机制 —— 这正好也是 14.7.40 的路径，
+     *   老版本行为不变。
+     */
+    @Volatile private var newGuardInstalled = false
+
+    private fun legacyNoLoopActive(): Boolean =
+        Prefs.bool(Prefs.K_PB_NO_LOOP, false) && !newGuardInstalled
+    // 鈽?DexKit 鎾斁鍣ㄥ彂鐜帮細xp 寮曠敤渚涘紓姝ュ彂鐜扮嚎绋?hook 鐢?
     @Volatile private var xpRefD: XposedInterface? = null
 
     fun hook(xp: XposedInterface, cl: ClassLoader) {
         Logger.d("PlaybackHook: hook() called")
         xpRefD = xp
-        // ★ hookLoop(xp, cl) 已移除（2026-09-21）：见下方墓碑注释
+        // 鈽?hookLoop(xp, cl) 宸茬Щ闄わ紙2026-09-21锛夛細瑙佷笅鏂瑰纰戞敞閲?
         hookBgPause(xp, cl)
-        // ★ DexKit 结构发现：按方法特征找播放器类（pause+start），抗混淆/插件化
+        // 鈽?DexKit 缁撴瀯鍙戠幇锛氭寜鏂规硶鐗瑰緛鎵炬挱鏀惧櫒绫伙紙pause+start锛夛紝鎶楁贩娣?鎻掍欢鍖?
         discoverPlayers(cl)
-        // ★ 上限 + daemon：目标类不存在（宿主改名/插件化）时原线程每 2s 空转
-        // 永不退出（电量/CPU 常驻税）；120 次 ≈ 4 分钟后放弃
+        // ★ 新 noLoop 实现（2026-09-23，PlayModule 版）：装成功则旧机制整体退场。
+        //   顺序很重要 —— 必须在 hookBgPause/discoverPlayers 之外**尽早**装，
+        //   因为旧机制的钩子已在上面的 discoverPlayers/延迟线程里注册。
+        try {
+            NoLoopGuard.install(xp, cl)
+            newGuardInstalled = true
+        } catch (_: Throwable) {}
+
+        // 注：排障期的 PlaybackProbe（View 树/数据层/PlayModule 观测）已移除（2026-09-23）。
+        //   它的使命是摸清 14.8 的播放链路 —— 结论已固化到 NoLoopGuard 与
+        //   《版本自适应适配方案.md》。留着会在每次启动白装 5+ 只读钩子、遍历 View 树，
+        //   属纯浪费。若日后要探测新版本，从 git 历史取回即可。
+        // 鈽?涓婇檺 + daemon锛氱洰鏍囩被涓嶅瓨鍦紙瀹夸富鏀瑰悕/鎻掍欢鍖栵級鏃跺師绾跨▼姣?2s 绌鸿浆
+        // 姘镐笉閫€鍑猴紙鐢甸噺/CPU 甯搁┗绋庯級锛?20 娆?鈮?4 鍒嗛挓鍚庢斁寮?
         Thread {
             var tries = 0
             while (!delayedHooked && tries < 120) {
@@ -39,9 +116,9 @@ object PlaybackHook {
         }.also { it.isDaemon = true }.start()
     }
 
-    // ★ DexKit 结构发现（官方 DSL，2026-09）：create(apkPath) 单参 + use 自动 close；
-    // 按「pause+start 无参」找播放器类，hook start()（noLoop 拦截 + currentPlayer 跟踪），
-    // pause 写回 mPauseRef 供 BFS 后台暂停优先使用
+    // 鈽?DexKit 缁撴瀯鍙戠幇锛堝畼鏂?DSL锛?026-09锛夛細create(apkPath) 鍗曞弬 + use 鑷姩 close锛?
+    // 鎸夈€宲ause+start 鏃犲弬銆嶆壘鎾斁鍣ㄧ被锛宧ook start()锛坣oLoop 鎷︽埅 + currentPlayer 璺熻釜锛夛紝
+    // pause 鍐欏洖 mPauseRef 渚?BFS 鍚庡彴鏆傚仠浼樺厛浣跨敤
     private fun discoverPlayers(cl: ClassLoader) {
         Thread {
             try {
@@ -57,10 +134,58 @@ object PlaybackHook {
                             }
                         }
                     }
-                    Logger.always("DexKit candidates=${found.size}")
+                    Logger.once("dexkit.cands", "DexKit candidates=${found.size}")
+                    // ★ 候选排查（2026-09-23 真机「禁止循环没生效」修复）：
+                    //   原先取前 8 个候选逐个试，结果命中的是
+                    //   `com.kuaishou.commercial.tachikoma.view.MKVideoView`（**广告**的
+                    //   VideoView）—— 用户真正看的视频不经过它，于是 start 钩子白装，
+                    //   「禁止循环播放」看起来完全没生效。
+                    //   这里把全部候选的**类名 + 是否含 getCurrentPosition/getDuration**
+                    //   打出来（once 级，每进程一次），据此选出真正的播放器。
+                    Logger.once("dexkit.candlist") {
+                        val sb = StringBuilder("DexKit 候选清单:")
+                        for ((i, cd) in found.withIndex()) {
+                            if (i >= 40) { sb.append(" ...(共${found.size})"); break }
+                            val hasPos = try {
+                                cd.getInstance(cl).getMethod("getCurrentPosition") != null
+                            } catch (_: Throwable) { false }
+                            val hasDur = try {
+                                cd.getInstance(cl).getMethod("getDuration") != null
+                            } catch (_: Throwable) { false }
+                            sb.append("\n  ").append(cd.name)
+                                .append(if (hasPos) " [+pos]" else "")
+                                .append(if (hasDur) " [+dur]" else "")
+                        }
+                        sb.toString()
+                    }
                     val xp = xpRefD ?: return@use
                     var hooked = 0
-                    for (cd in found.take(8)) {
+                    // ★★ 候选**排序**（2026-09-23 真机「禁止循环没生效」修复）：
+                    //
+                    //   原实现 `found.take(8)` 直接取 DexKit 返回的前 8 个 —— 而实测
+                    //   候选有 58 个、顺序任意，前 8 个里真正的播放器一个都没有，
+                    //   于是钩子装到了 `MKVideoView`（**广告**的 VideoView）上：
+                    //   用户看的视频根本不经过它 ⇒「禁止循环播放」看起来完全没生效。
+                    //
+                    //   实测候选清单里真正的播放器是（含 getCurrentPosition/getDuration）：
+                    //     com.kwai.video.player.kwai_player.KwaiMediaPlayer   ← 主力
+                    //     com.kwai.video.player.KsMediaPlayerImpl
+                    //     com.kwai.video.wayne.player.main.WaynePlayer          ← 直播
+                    //     com.kwai.video.aemonplayer.AemonMediaPlayer
+                    //   注意 `kwai_player` 这一层包名是重构后新增的（README 记录的
+                    //   「KwaiMediaPlayerImpl 系列全 MISS」正是被它取代）。
+                    //
+                    //   排序依据（**语义包名优先，不看混淆名**）见 adapt/PlayerRank。
+                    //   独立成类是为了能被 AdaptVerify 断言（本文件持有 android.os.Handler
+                    //   无法在 JVM 加载）。
+                    val rankMap = found.associateBy { it.name }
+                    val ranked = io.github.angbang852.manjiao.adapt.PlayerRank
+                        .rank(found.map { it.name })
+                        .mapNotNull { rankMap[it] }
+                    Logger.once("dexkit.rank") {
+                        "DexKit 排序后前 8: " + ranked.take(8).joinToString(", ") { it.name }
+                    }
+                    for (cd in ranked.take(8)) {
                         try {
                             val cn = cd.name
                             val cc = cd.getInstance(cl)
@@ -72,25 +197,28 @@ object PlaybackHook {
                             try {
                                 xp.hook(start).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                                     .setId("pb.dexkit.start").intercept { chain ->
-                                        if (Prefs.bool(Prefs.K_PB_NO_LOOP, false) && System.currentTimeMillis() - lastCompletionMs < 1000) {
+                                        // ★ 按实例判定：只有**这个实例**刚播完才拦。
+                                        //   换视频后的新实例没有完成记录 → 用户点击可正常播放。
+                                        if (legacyNoLoopActive() && justCompleted(chain.thisObject)) {
+                                            Logger.d("pb: BLOCK start after completion (noLoop, same instance)")
                                             return@intercept null
                                         }
                                         chain.proceed().also {
                                             currentPlayer = chain.thisObject
-                                            if (Prefs.bool(Prefs.K_PB_NO_LOOP, false) && pos != null && dur != null && pause != null && !checkRunning) {
-                                                startCheckThread(pos, dur, pause)
+                                            if (legacyNoLoopActive() && pos != null && dur != null && pause != null && !checkRunning) {
+                                                startCheckThread(chain.thisObject, pos, dur, pause)
                                             }
                                         }
                                     }
                                 mPauseRef = pause
                                 hooked++
-                                Logger.always("DexKit hooked player: $cn")
+                                Logger.once("dexkit.player", "DexKit hooked player: $cn")
                             } catch (_: Throwable) {}
                         } catch (_: Throwable) {}
                     }
-                    Logger.always("DexKit hooked=$hooked")
+                    Logger.once("dexkit.hooked", "DexKit hooked=$hooked")
                 }
-            } catch (t: Throwable) { Logger.always("DexKit fail: ${t.message}") }
+            } catch (t: Throwable) { Logger.once("dexkit.fail", "DexKit fail: ${t.message}") }
         }.also { it.isDaemon = true; it.name = "MJ-DexKit" }.start()
     }
 
@@ -110,17 +238,18 @@ object PlaybackHook {
         if (mStart != null) {
             xp.hook(mStart).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .setId("pb.aemon.start").intercept { chain ->
-                    if (Prefs.bool(Prefs.K_PB_NO_LOOP, false) && System.currentTimeMillis() - lastCompletionMs < 1000) {
-                        Logger.d("pb: BLOCK start after completion (noLoop)")
+                    // ★ 按实例判定（同 DexKit 路径）：见 justCompleted 的说明
+                    if (legacyNoLoopActive() && justCompleted(chain.thisObject)) {
+                        Logger.d("pb: BLOCK start after completion (noLoop, same instance)")
                         return@intercept null
                     }
                     chain.proceed().also {
-                        // ★ currentPlayer 与开关解耦（审阅 2026-09 P1）：原先只在
-                        // K_PB_NO_LOOP 开启时赋值，而 pausePlayer 依赖它——只开
-                        // 「后台暂停」时 currentPlayer 恒 null，功能整体失效
+                        // 鈽?currentPlayer 涓庡紑鍏宠В鑰︼紙瀹￠槄 2026-09 P1锛夛細鍘熷厛鍙湪
+                        // K_PB_NO_LOOP 寮€鍚椂璧嬪€硷紝鑰?pausePlayer 渚濊禆瀹冣€斺€斿彧寮€
+                        // 銆屽悗鍙版殏鍋溿€嶆椂 currentPlayer 鎭?null锛屽姛鑳芥暣浣撳け鏁?
                         currentPlayer = chain.thisObject
-                        if (Prefs.bool(Prefs.K_PB_NO_LOOP, false) && mGetPos != null && mGetDur != null && mPause != null && !checkRunning) {
-                            startCheckThread(mGetPos, mGetDur, mPause)
+                        if (legacyNoLoopActive() && mGetPos != null && mGetDur != null && mPause != null && !checkRunning) {
+                            startCheckThread(chain.thisObject, mGetPos, mGetDur, mPause)
                         }
                     }
                 }
@@ -131,10 +260,10 @@ object PlaybackHook {
             xp.hook(mSeek).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .setId("pb.aemon.seekTo").intercept { chain ->
                     val pos = chain.args.getOrNull(0)
-                    // ★ 只拦「播放结束后的自动回跳」（与 start 拦截共用 1s 窗口）：
-                    // 无差别拦 seekTo(0) 会把用户手动把进度条拖回片头也吞掉
-                    if (Prefs.bool(Prefs.K_PB_NO_LOOP, false) && pos == 0 &&
-                        System.currentTimeMillis() - lastCompletionMs < 1000
+                    // 鈽?鍙嫤銆屾挱鏀剧粨鏉熷悗鐨勮嚜鍔ㄥ洖璺炽€嶏紙涓?start 鎷︽埅鍏辩敤 1s 绐楀彛锛夛細
+                    // 鏃犲樊鍒嫤 seekTo(0) 浼氭妸鐢ㄦ埛鎵嬪姩鎶婅繘搴︽潯鎷栧洖鐗囧ご涔熷悶鎺?
+                    if (legacyNoLoopActive() && pos == 0 &&
+                        justCompleted(chain.thisObject)
                     ) {
                         Logger.d("pb: BLOCK seekTo(0) (noLoop auto-rewind)")
                         return@intercept null
@@ -147,8 +276,8 @@ object PlaybackHook {
         if (mComplete != null) {
             xp.hook(mComplete).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .setId("pb.aemon.notifyOnCompletion").intercept { chain ->
-                    if (Prefs.bool(Prefs.K_PB_NO_LOOP, false)) {
-                        lastCompletionMs = System.currentTimeMillis()
+                    if (legacyNoLoopActive()) {
+                        markCompletion(chain.thisObject)
                         Logger.d("pb: BLOCK completion (noLoop), pause")
                         try { mPause?.invoke(chain.thisObject) } catch (_: Throwable) {}
                         return@intercept null
@@ -159,18 +288,35 @@ object PlaybackHook {
         }
 
     }
-
-    private fun startCheckThread(mGetPos: java.lang.reflect.Method, mGetDur: java.lang.reflect.Method, mPause: java.lang.reflect.Method) {
+    /**
+     * 播完即停的看门狗（**按实例**，2026-09-23 修复）。
+     *
+     * ★ 原实现每 tick 读全局 `currentPlayer`，而该字段会被**任意** start 覆盖。
+     *   详情页滑动时新旧播放器交替 start，看门狗可能：
+     *     · 中途改去检查另一个实例（拿错 pos/dur）
+     *     · 对已经离屏的实例调 pause —— 用户看到当前视频「卡住不动」
+     *   现改为**绑定启动它的那个实例**，全程只操作它；实例被回收即退出，
+     *   不再影响后续视频（这正是「滑回来后视频变了」的成因之一）。
+     *
+     * @param target 本看门狗负责的播放器实例（弱引用持有，不阻止回收）
+     */
+    private fun startCheckThread(
+        target: Any,
+        mGetPos: java.lang.reflect.Method,
+        mGetDur: java.lang.reflect.Method,
+        mPause: java.lang.reflect.Method,
+    ) {
         checkRunning = true
+        val ref = java.lang.ref.WeakReference(target)
         Thread {
             var closedTicks = 0
             while (checkRunning) {
                 try {
                     Thread.sleep(500)
-                    val p = currentPlayer ?: break
-                    // ★ 开关关闭连续 10s（20 tick）即退出守护线程（审阅 2026-09 P2）：
-                    // 原先仅 continue，线程用过一次后永不退出；重新 start() 时会再拉起
-                    if (!Prefs.bool(Prefs.K_PB_NO_LOOP, false)) {
+                    val p = ref.get() ?: break
+                    // 鈽?寮€鍏冲叧闂繛缁?10s锛?0 tick锛夊嵆閫€鍑哄畧鎶ょ嚎绋嬶紙瀹￠槄 2026-09 P2锛夛細
+                    // 鍘熷厛浠?continue锛岀嚎绋嬬敤杩囦竴娆″悗姘镐笉閫€鍑猴紱閲嶆柊 start() 鏃朵細鍐嶆媺璧?
+                    if (!legacyNoLoopActive()) {
                         if (++closedTicks >= 20) break
                         continue
                     }
@@ -180,6 +326,7 @@ object PlaybackHook {
 
                     if (dur > 1000 && pos >= dur - 300) {
                         mPause.invoke(p)
+                        markCompletion(p)
                         Logger.d("pb: noLoop pause at pos=$pos dur=$dur")
                         break
                     }
@@ -189,21 +336,21 @@ object PlaybackHook {
         }.also { it.isDaemon = true }.start()
     }
 
-    // ★ hookLoop 整体移除（2026-09-21）：原 hook 播放器 setLooping/setRepeatMode 等
-    // 循环参数方法，在「停止循环播放」开启时把参数改写为 false/0。
-    // 删除理由：这是**在播放器对象上事后改参数**——不是本模块的「数据源拦截」路线，
-    // 也拦不住（循环状态由播放器内部与上层各自维护，一次性改参不落地）；
-    // 且实测从未生效：核心动作 `chain.args[0] = ...` 属 libxposed 只读 List 误用
-    // （Chain.getArgs() 返回只读 List，List.set() 必抛，被 catch 吞掉）。
-    // 注意：防循环功能其余两条机制仍保留且有效——① start 拦截（播完 1s 内吞掉 start，
-    // 见 delayedHookAemon）② startCheckThread 播完时主动调 pause。后者是 2026-09-21
-    // 实测「暂停标志卡住 / 点暂停无反应」的成因（注入暂停绕过上层状态机）；
-    // 如需彻底移除防循环功能，应连同这两条与开关 K_PB_NO_LOOP 一起评估。
+    // 鈽?hookLoop 鏁翠綋绉婚櫎锛?026-09-21锛夛細鍘?hook 鎾斁鍣?setLooping/setRepeatMode 绛?
+    // 寰幆鍙傛暟鏂规硶锛屽湪銆屽仠姝㈠惊鐜挱鏀俱€嶅紑鍚椂鎶婂弬鏁版敼鍐欎负 false/0銆?
+    // 鍒犻櫎鐞嗙敱锛氳繖鏄?*鍦ㄦ挱鏀惧櫒瀵硅薄涓婁簨鍚庢敼鍙傛暟**鈥斺€斾笉鏄湰妯″潡鐨勩€屾暟鎹簮鎷︽埅銆嶈矾绾匡紝
+    // 涔熸嫤涓嶄綇锛堝惊鐜姸鎬佺敱鎾斁鍣ㄥ唴閮ㄤ笌涓婂眰鍚勮嚜缁存姢锛屼竴娆℃€ф敼鍙備笉钀藉湴锛夛紱
+    // 涓斿疄娴嬩粠鏈敓鏁堬細鏍稿績鍔ㄤ綔 `chain.args[0] = ...` 灞?libxposed 鍙 List 璇敤
+    // 锛圕hain.getArgs() 杩斿洖鍙 List锛孡ist.set() 蹇呮姏锛岃 catch 鍚炴帀锛夈€?
+    // 娉ㄦ剰锛氶槻寰幆鍔熻兘鍏朵綑涓ゆ潯鏈哄埗浠嶄繚鐣欎笖鏈夋晥鈥斺€斺憼 start 鎷︽埅锛堟挱瀹?1s 鍐呭悶鎺?start锛?
+    // 瑙?delayedHookAemon锛夆憽 startCheckThread 鎾畬鏃朵富鍔ㄨ皟 pause銆傚悗鑰呮槸 2026-09-21
+    // 瀹炴祴銆屾殏鍋滄爣蹇楀崱浣?/ 鐐规殏鍋滄棤鍙嶅簲銆嶇殑鎴愬洜锛堟敞鍏ユ殏鍋滅粫杩囦笂灞傜姸鎬佹満锛夛紱
+    // 濡傞渶褰诲簳绉婚櫎闃插惊鐜姛鑳斤紝搴旇繛鍚岃繖涓ゆ潯涓庡紑鍏?K_PB_NO_LOOP 涓€璧疯瘎浼般€?
 
 
-    // ★ 抖鸡对齐（PlaybackControlFeature）：真后台判定四路（onPause/onUserLeaveHint/
-    // onStop/TRIM_MEMORY_UI_HIDDEN）+ 前台计数 + 220ms 去抖 + 多源暂停执行（BFS 找
-    // 播放器，抗混淆/插件化）
+    // 鈽?鎶栭浮瀵归綈锛圥laybackControlFeature锛夛細鐪熷悗鍙板垽瀹氬洓璺紙onPause/onUserLeaveHint/
+    // onStop/TRIM_MEMORY_UI_HIDDEN锛? 鍓嶅彴璁℃暟 + 220ms 鍘绘姈 + 澶氭簮鏆傚仠鎵ц锛圔FS 鎵?
+    // 鎾斁鍣紝鎶楁贩娣?鎻掍欢鍖栵級
     @Volatile private var resumedCount = 0
     @Volatile private var uiHidden = false
     @Volatile private var lastPauseTarget: Any? = null
@@ -214,8 +361,8 @@ object PlaybackHook {
 
     private fun hookBgPause(xp: XposedInterface, cl: ClassLoader) {
         val actCls = Reflect.findClass("android.app.Activity", cl) ?: return
-        // 0=onResume 1=onPause 2=onUserLeaveHint 3=onStop（全 Activity 计数，应用内
-        // 跳转时 onPause/onResume 成对出现，resumedCount 维持 ≥1 → 不误暂停）
+        // 0=onResume 1=onPause 2=onUserLeaveHint 3=onStop锛堝叏 Activity 璁℃暟锛屽簲鐢ㄥ唴
+        // 璺宠浆鏃?onPause/onResume 鎴愬鍑虹幇锛宺esumedCount 缁存寔 鈮? 鈫?涓嶈鏆傚仠锛?
         val lifecycle = mapOf("onResume" to 0, "onPause" to 1, "onUserLeaveHint" to 2, "onStop" to 3)
         for ((mn, kind) in lifecycle) {
             val m = Reflect.findMethod(actCls, mn, 0) ?: continue
@@ -234,7 +381,7 @@ object PlaybackHook {
                 }
             Logger.d("PlaybackHook: hooked Activity.$mn")
         }
-        // TRIM_MEMORY_UI_HIDDEN：系统级「界面已隐藏」信号（HOME/最近任务）
+        // TRIM_MEMORY_UI_HIDDEN锛氱郴缁熺骇銆岀晫闈㈠凡闅愯棌銆嶄俊鍙凤紙HOME/鏈€杩戜换鍔★級
         try {
             val app = Class.forName("android.app.ActivityThread").getMethod("currentApplication").invoke(null) as android.app.Application
             app.registerComponentCallbacks(object : android.content.ComponentCallbacks2 {
@@ -252,7 +399,7 @@ object PlaybackHook {
 
     private fun requestBgPause() {
         if (!Prefs.bool(Prefs.K_PB_BG_PAUSE, false)) return
-        // 只有真退到后台（无前台 Activity 或系统判定 UI 已隐藏）才暂停
+        // 鍙湁鐪熼€€鍒板悗鍙帮紙鏃犲墠鍙?Activity 鎴栫郴缁熷垽瀹?UI 宸查殣钘忥級鎵嶆殏鍋?
         if (resumedCount > 0 && !uiHidden) return
         handler.removeCallbacks(pauseRunnable)
         handler.postDelayed(pauseRunnable, 220)
@@ -260,14 +407,14 @@ object PlaybackHook {
 
     private fun pauseCurrentPlayback(reason: String): Boolean {
         try {
-            // 1) 已知目标（currentPlayer + 上次成功暂停对象）
+            // 1) 宸茬煡鐩爣锛坈urrentPlayer + 涓婃鎴愬姛鏆傚仠瀵硅薄锛?
             val cands = ArrayList<Any>()
             currentPlayer?.let { cands.add(it) }
             lastPauseTarget?.let { cands.add(it) }
             for (c in cands) {
                 if (c != null && invokePause(c, reason)) return true
             }
-            // 2) BFS 可见 Fragment 对象图找带 pause 方法的对象（抖鸡 findPauseTarget 同款）
+            // 2) BFS 鍙 Fragment 瀵硅薄鍥炬壘甯?pause 鏂规硶鐨勫璞★紙鎶栭浮 findPauseTarget 鍚屾锛?
             val frag = ContentFilterHook.currentFeedFragment() ?: return false
             val t = findPauseTarget(frag)
             if (t != null && invokePause(t, reason)) return true
@@ -308,7 +455,7 @@ object PlaybackHook {
         return null
     }
 
-    // BFS 深度 2 / 80 对象（抖鸡 PAUSE_SCAN_MAX_DEPTH=2 / MAX_OBJECTS=80 同款）
+    // BFS 娣卞害 2 / 80 瀵硅薄锛堟姈楦?PAUSE_SCAN_MAX_DEPTH=2 / MAX_OBJECTS=80 鍚屾锛?
     private fun findPauseTarget(root: Any): Any? {
         val seen = java.util.IdentityHashMap<Any, Boolean>()
         val counter = intArrayOf(0)

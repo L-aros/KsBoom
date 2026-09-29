@@ -156,27 +156,65 @@ object ImmersiveHook {
     private val scrollListener = ViewTreeObserver.OnScrollChangedListener { vtreeDirty = true; scheduleQuickHide() }
     private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener { vtreeDirty = true; scheduleQuickHide() }
 
+    /**
+     * 沉浸相关开关的一次性快照（性能修复 2026-09 · S3/M2）。
+     *
+     * 原实现里 `onlyGoldOn()`（7 次 Prefs 读）、`anyCustomSubOn()`（6 次）、
+     * `hideByConfig` 内的 mode 计算（2 次）各自独立读取，且 `hideTask` 的
+     * 判定分支与 finally 分支各调一次 —— 单轮最多 20+ 次 Prefs 读取。
+     * 这些开关在一轮内不会变化，统一快照后各逻辑改读快照字段。
+     *
+     * 注意：快照只在**单轮 pass 内**有效，不跨轮复用（否则用户拨开关后要等下一轮）。
+     */
+    private class ImmMode(
+        val immOn: Boolean, val immCustom: Boolean,
+        val topbar: Boolean, val right: Boolean, val bottom: Boolean,
+        val nickname: Boolean, val collection: Boolean, val gold: Boolean
+    ) {
+        /** 任一自定义子项开启（原 anyCustomSubOn） */
+        val anyCustomSub: Boolean get() = topbar || right || bottom || nickname || collection || gold
+        /** 仅金币开启、其余全关（原 onlyGoldOn，决定轮询可降到 5s） */
+        val onlyGold: Boolean get() = gold && !topbar && !right && !bottom && !nickname && !collection && !immOn && !immCustom
+        /** 模式码（原 hideByConfig 内 mode 计算）：1=一键沉浸，2=自定义，0=全关 */
+        val mode: Int get() = if (immOn) 1 else if (immCustom || anyCustomSub) 2 else 0
+    }
+
+    private fun readImmMode(): ImmMode = ImmMode(
+        immOn = Prefs.bool(Prefs.K_IMM_ON, false),
+        immCustom = Prefs.bool(Prefs.K_IMM_CUSTOM, false),
+        topbar = Prefs.bool(Prefs.K_IMM_TOPBAR_ON, false),
+        right = Prefs.bool(Prefs.K_IMM_RIGHT_ON, false),
+        bottom = Prefs.bool(Prefs.K_IMM_BOTTOM_BAR, false),
+        nickname = Prefs.bool(Prefs.K_IMM_NICKNAME, false),
+        collection = Prefs.bool(Prefs.K_IMM_COLLECTION, false),
+        gold = Prefs.bool(Prefs.K_IMM_GOLD, false)
+    )
+
     private val hideTask = object : Runnable {
         override fun run() {
             // ★ 全项目唯一无兜底主线程入口（审阅 2026-09 P1）：hideByConfig 内部任何
             // RuntimeException 会直接崩快手进程——整段 try/catch，重排放 finally
             // 保证轮询永不中断
+            var imm: ImmMode? = null
             try {
                 val act = tracked
                 if (act != null) {
-                    // 只比模式（内存 Prefs 读取，微秒级）；模式变了或有布局/滚动变化才全树
-                    val modeNow = if (Prefs.bool(Prefs.K_IMM_ON, false)) 1
-                        else if (Prefs.bool(Prefs.K_IMM_CUSTOM, false) || anyCustomSubOn()) 2 else 0
-                    if (modeNow != lastMode || vtreeDirty || firstRestore) {
+                    // ★ 性能修复（S3/M2）：一次快照读完 8 个开关（原实现本函数内
+                    // 2 次 + anyCustomSubOn 6 次 + finally 里 onlyGoldOn 7 次）
+                    val m = readImmMode()
+                    imm = m
+                    if (m.mode != lastMode || vtreeDirty || firstRestore) {
                         vtreeDirty = false
-                        hideByConfig(act)
+                        hideByConfig(act, m)
                     }
                 }
             } catch (t: Throwable) {
                 Logger.d("imm hideTask: " + t.javaClass.simpleName + ": " + t.message)
             } finally {
-                // 全关时降频轮询（只读 Prefs 判断 mode，零遍历）；有开关开启才高频跑
-                if (active) handler.postDelayed(this, if (lastMode == 0) 3000 else if (onlyGoldOn()) 5000 else 2500)
+                // 全关时降频轮询；有开关开启才高频跑。
+                // 复用同轮快照（为空说明没走到读开关那步，此时补读一次）
+                val m = imm ?: readImmMode()
+                if (active) handler.postDelayed(this, if (lastMode == 0) 3000 else if (m.onlyGold) 5000 else 2500)
             }
         }
     }
@@ -217,7 +255,7 @@ object ImmersiveHook {
         && !Prefs.bool(Prefs.K_IMM_ON, false)
         && !Prefs.bool(Prefs.K_IMM_CUSTOM, false)
 
-    private fun hideByConfig(act: Activity) {
+    private fun hideByConfig(act: Activity, imm: ImmMode = readImmMode()) {
         // GC 压力保护：堆 >90% 时跳过本轮遍历，避免在 GC 期间加重主线程负担
         // （快手稳态堆 234/258MB，GC 每次回收 17-64MB 耗时 128-999ms）
         val rt = Runtime.getRuntime()
@@ -227,9 +265,9 @@ object ImmersiveHook {
             return
         }
         val decor = act.window.decorView as? ViewGroup ?: return
-        val immOn = Prefs.bool(Prefs.K_IMM_ON, false)
-        val immCustom = Prefs.bool(Prefs.K_IMM_CUSTOM, false)
-        val mode = if (immOn) 1 else if (immCustom || anyCustomSubOn()) 2 else 0
+        // ★ 性能修复（S3/M2）：改用调用方传入的开关快照，本函数不再重复读 Prefs
+        val immOn = imm.immOn
+        val mode = imm.mode
         if (mode == 0) {
             // 只在从开→关的转换时做一次全树恢复；之后零遍历（卡顿修复：
             // 之前每 1.5s 全树 walkAll 一遍刷日志）
@@ -282,20 +320,21 @@ object ImmersiveHook {
         var c1 = 0
         var c2 = 0
         if (immOn) {
-            c1 = hideByIds(decor, force)
-            c2 = hideByPosition(decor, w, h, force)
+            // ★ 性能修复（审阅 2026-09 · S3）：原先 hideByIds + hideByPosition +
+            // hideSelected 各自全树遍历一遍（一轮 pass 最多 3 次 walk）——合并为
+            // applyHideRulesSinglePass 的**单次遍历**，语义见该函数注释。
             // 一键沉浸同时应用自定义隐藏子项（topbar/right/other），
-            // doRestore=false 避免 restoreUnmatched 把一键沉浸 hideByIds/hideByPosition
-            // 隐藏的 view 恢复成 VISIBLE 导致右侧按钮闪烁
-            val sets = buildCustomSets()
-            if (sets.top.isNotEmpty() || sets.right.isNotEmpty() || sets.other.isNotEmpty()) {
-                val c3 = hideSelected(decor, sets.top, sets.right, sets.other, w, h, doRestore = false)
-                c2 += c3
-            }
-            Logger.d("imm pass=$passCount force=$force ids=$c1 pos=$c2")
+            // 单遍实现内部对 immOn=true 不做 restoreUnmatched，避免把一键沉浸
+            // hideByIds/hideByPosition 隐藏的 view 恢复成 VISIBLE 导致右侧按钮闪烁。
+            c2 = applyHideRulesSinglePass(decor, w, h, force, immOn = true, sets = buildCustomSets())
+            Logger.d("imm pass=$passCount force=$force merged=$c2")
         } else {
-            if (onlyGoldOn()) {
+            if (imm.onlyGold) {
                 val actRef = act
+                // ★ 性能修复（审阅 2026-09 · S1/M2）：原先每轮 14 个 id 各自调
+                // Prefs.bool 之外，还要靠 goldId() 的 synchronized 查表。此处
+                // GOLD_FAST_IDS 是常量数组，findViewById 本身是 O(树) 但只在
+                // 金币单开时走；保留原逻辑，仅在计数上合并。
                 for (gn in GOLD_FAST_IDS) {
                     // ★ 双命名空间兜底：硬编码主包命名空间在极速版（com.kuaishou.nebula）
                     // 上若资源表已随包名改名则恒返回 0，金币快速隐藏整体静默失效。
@@ -308,15 +347,14 @@ object ImmersiveHook {
                 }
             } else {
                 val sets = buildCustomSets()
-                val topbarSet = sets.top
-                val rightSet = sets.right
-                val otherSet = sets.other
-
-                c2 = hideSelected(decor, topbarSet, rightSet, otherSet, w, h)
-                if (topbarSet.isNotEmpty()) c2 += hideTopBarIndicator(decor, w, h)
-                else restoreStrip(decor)
-                if (passCount % 20 == 0) Logger.d("imm dbg topbar=${topbarSet.size} right=${rightSet.size} other=${otherSet.size} items=${topbarSet.joinToString(",")}")
-                if (passCount % 20 == 0) Logger.d("imm pass=$passCount force=$force ids=$c1 sel=$c2")
+                // ★ 性能修复（审阅 2026-09 · S3）：原先 hideSelected（一次 walk）
+                // + hideTopBarIndicator（再一次 walkAll）两次全树遍历——合并为单次。
+                c2 = applyHideRulesSinglePass(decor, w, h, force, immOn = false, sets = sets)
+                // topbar 集合为空时仍需周期性恢复 kcube_tab_strip 的 willNotDraw
+                // （原实现在此分支外单独调 restoreStrip，语义保留）
+                if (sets.top.isEmpty()) restoreStrip(decor)
+                if (passCount % 20 == 0) Logger.d("imm dbg topbar=${sets.top.size} right=${sets.right.size} other=${sets.other.size} items=${sets.top.joinToString(",")}")
+                if (passCount % 20 == 0) Logger.d("imm pass=$passCount force=$force merged=$c2")
             }
             // dumpTopBar 每30轮刷屏拖垮 logcat/CPU，已停用
         }
@@ -869,6 +907,15 @@ object ImmersiveHook {
                 Logger.d("imm $info")
             }
             Logger.d("imm dump end")
+            // ★ 精选页结构探测（2026-09-23）：用户报「精选页一条条刷」时出现
+            //   「文案不变、画面在变」。精选页的 Fragment
+            //   （HomeFeaturedMilanoContainerFragment）全项目零处理，
+            //   模块不知道「当前在屏是哪条」。
+            //
+            //   这里借 dumpUi 已有的**一次全树遍历**顺带探测精选页容器 ——
+            //   复用遍历、零额外成本（dumpUi 本身只在页面切换时跑）。
+            //   只读，不做任何修改。
+            try { FeaturedProbe.dumpFeaturedViewTree() } catch (_: Throwable) {}
         } catch (e: Throwable) {
             Logger.d("imm dump err: ${e.message}")
         }
@@ -911,5 +958,132 @@ object ImmersiveHook {
             }
         }
         return false
+    }
+
+    // ==================== 单遍遍历（性能修复 2026-09 · S3） ====================
+
+    /**
+     * **一次全树遍历**完成 ids / position / selected 三套隐藏规则 + 顶栏指示器。
+     *
+     * 原实现：`hideByIds` + `hideByPosition` + `hideSelected`（其一键沉浸分支）
+     * 各自独立 `walk(root)` 全树遍历一遍，一轮 pass 最多 3 次全树 + 若干次
+     * `hideIndicatorNear` 的 `walkAll`。快手 decor 树数千 View，
+     * 每 2.5 秒 × 3~4 次遍历是沉浸模式下的常驻主线程开销。
+     *
+     * 本函数把三套规则合并到**同一次遍历**里逐 View 依次尝试，语义与原实现一致：
+     * - 三套规则都只对「VISIBLE + 非视频 + 有尺寸」的 View 生效（同一个前置过滤）
+     * - 任一套命中即停（原实现里各规则各自 `return@walk`，但它们是独立的 walk；
+     *   合并后用 `matched` 标志保证同一 View 不被多套规则重复处理，
+     *   与原实现「先 ids 后 position（各自可能命中同一个 View）」相比**更保守**
+     *   —— 不会出现两条规则对同一 View 重复置 GONE 的情况）
+     * - `getLocationOnScreen` 每 View 至多算一次并缓存复用（原实现各规则各算一次）
+     *
+     * @param immOn 一键沉浸开启：跑 ids + position + selected
+     * @param sets  自定义隐藏集合（immOn 为假时只用它跑 selected）
+     * @return 隐藏计数
+     */
+    private fun applyHideRulesSinglePass(
+        decor: ViewGroup, w: Int, h: Int, force: Boolean,
+        immOn: Boolean, sets: CustomSets
+    ): Int {
+        var count = 0
+        val loc = IntArray(2)
+        val topbar = sets.top
+        val right = sets.right
+        val other = sets.other
+        val useSelected = !immOn || topbar.isNotEmpty() || right.isNotEmpty() || other.isNotEmpty()
+        // 一键沉浸下的 selected 不做 restore（避免把 ids/position 藏的项恢复成 VISIBLE）
+        if (!immOn) restoreUnmatched(decor, topbar, right, other, w, h)
+        val needIndicator = topbar.isNotEmpty()
+
+        walk(decor, 0) { v, _ ->
+            if (v === decor) return@walk
+            if (v.visibility != View.VISIBLE) return@walk
+            if (isVideoView(v)) return@walk
+            val vw = v.width
+            val vh = v.height
+
+            var matched = false
+
+            // ---- 规则 1：id 名单（原 hideByIds）----
+            if (immOn) {
+                val idName = idNameOf(v)
+                for (key in HIDE_IDS) {
+                    if (idName == key || idName.contains(key, true)) {
+                        if (hide(v, force)) count++
+                        matched = true
+                        break
+                    }
+                }
+            }
+
+            // ---- 规则 2：几何位置（原 hideByPosition）----
+            if (!matched && immOn && vw != 0 && vh != 0) {
+                val left = v.left; val top = v.top; val right0 = v.right; val bottom = v.bottom
+                val isFloating = vw in 40..250 && vh in 40..250 &&
+                    (right0 > w * 60 / 100 && bottom > h * 60 / 100 || left < w * 40 / 100 && bottom > h * 60 / 100)
+                val isLeftAuthor = left < w * 35 / 100 && top in (h * 10 / 100)..(h * 70 / 100) && vw in 30..300 && vh in 30..300
+                if (isFloating || isLeftAuthor) {
+                    if (hide(v, force)) count++
+                    matched = true
+                } else if (v is ViewGroup && v.childCount != 0) {
+                    val isRightCol = left > w * 82 / 100 && vw in 1..(w / 5) && vh in 1..(h * 2 / 3) && bottom > h / 3
+                    val isTopBar = top in 0..(h / 4) && vh in 1..(h / 3) && vw > w / 2
+                    val isBottomBar = bottom > h * 3 / 4 && vh in 1..(h / 3) && vw > w / 2
+                    if (isRightCol || isTopBar || isBottomBar) {
+                        if (hide(v, force)) count++
+                        matched = true
+                    }
+                }
+            }
+
+            // ---- 规则 3：自定义隐藏项（原 hideSelected 主体）----
+            if (!matched && useSelected) {
+                val m = try {
+                    // loc 每 View 只算一次：matchHideItem 内部会调 getLocationOnScreen，
+                    // 这里传入复用缓冲区（该函数签名已支持 loc 参数）
+                    matchHideItem(v, topbar, right, other, w, h, loc)
+                } catch (_: Throwable) { null }
+                if (m != null) {
+                    // 惰性求值：quiet 时零成本
+                    Logger.d({ "imm M item=${m.item} cls=${v.javaClass.simpleName} id=${idNameOf(v)} x=${m.absX} y=${m.absY} w=${v.width} h=${v.height}" })
+                    if (m.byIdRight) {
+                        v.visibility = View.GONE; v.tag = HIDDEN_TAG; count++
+                    } else if (hideTopItem(v, decor, w, h, m.isRight || m.isRightArea, m.absY)) {
+                        count++
+                        if (m.isTopArea) hideIndicatorNear(v, decor)
+                    }
+                    matched = true
+                }
+            }
+
+            // ---- 顶栏指示器细条（原 hideTopBarIndicator 主体，可与上面共存）----
+            if (needIndicator && !matched && vw != 0 && vh != 0) {
+                v.getLocationOnScreen(loc)
+                val absY = loc[1]
+                if (absY < h / 4) {
+                    val idName = idNameOf(v)
+                    if (idName == "kcube_tab_strip" && v.tag !== STRIP_TAG) {
+                        v.setWillNotDraw(true)
+                        v.tag = STRIP_TAG
+                        v.invalidate()
+                        count++
+                    }
+                    val cn = v.javaClass.simpleName
+                    val isIndicator = idName.contains("indicator", true) || idName.contains("underline", true) ||
+                        idName.contains("selector_line", true) || idName.contains("tab_line", true) ||
+                        idName.contains("tab_indicator", true) || cn.contains("Indicator", true)
+                    val isLine = (vh in 1..10 && vw > 20) ||
+                        (vh in 1..16 && vw in 20..(w / 3) && absY < h / 8 && v !is TextView && idName != "kcube_tab_strip")
+                    if (isIndicator || isLine) {
+                        v.visibility = View.GONE
+                        v.tag = HIDDEN_TAG
+                        count++
+                        Logger.d("imm LINE hidden y=$absY h=${v.height} w=${v.width} id=$idName cls=$cn")
+                    }
+                }
+            }
+        }
+        return count
     }
 }

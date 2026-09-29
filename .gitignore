@@ -1,4 +1,4 @@
-# Build
+﻿# Build
 .gradle/
 build/
 app/build/
@@ -35,7 +35,7 @@ app/.cxx/
 build_log.txt
 
 
-# �Ų�ű�����־�����ص����ã�����⣩
+# �Ų�ű�����־�����ص����ã�����⣩
 analyze_*.py
 probe*.txt
 boot*.txt
@@ -44,3 +44,46 @@ cfh_*.py
 
 dbg_*.py
 
+
+# 本地 git 备份 bundle（审阅 2026-09 · L4）：scrub 前的整仓快照，30MB 级。
+# 此前未被忽略 —— 一旦 git add -A 就会把整仓历史副本提交进仓库。
+*.bundle
+
+# 性能归因 / 调试产物（本地分析用，不入库）
+_*.txt
+_*.js
+_*.ps1
+
+# 本地 git 备份 bundle（审阅 2026-09 · L4）：scrub 前的整仓快照，约 30MB 级。
+# 此前未被忽略 —— 一旦 git add -A 就会把整仓历史副本提交进仓库。
+*.bundle
+
+# ============ 内部资料，不入库（2026-09-30） ============
+# 说明：以下为本机内部实测记录 / 调试产物 / 历史备份，
+#       含设备 IP、端口、崩溃栈、包名等内部信息，或已过期无用，一律不同步到公开仓库。
+
+# 内部实测文档（含设备 IP / adb 端口 / 崩溃栈 / 包名细节）
+docs/
+
+# 内部交接文档
+HANDOFF-*.md
+
+# 历史脚本归档与性能归因产物（含本机调试脚本、logcat 采样）
+_archive/
+
+# 宿主包分析素材（可重新获取的 base.apk 等）
+_ks/
+
+# 历史备份（已过期，现行源码更新）
+.backup-*/
+*.bak
+*.damaged.bak
+
+# 设计稿（内部）
+设计/
+
+# LSPosed 官方 API 库（编译依赖，本地保留，不入库）
+app/libs/*.jar
+
+# 模块运行时配置镜像（真身在 /sdcard/Android/media/<包名>/，属运行产物）
+slowkick.properties

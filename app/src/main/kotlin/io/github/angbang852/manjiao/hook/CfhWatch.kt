@@ -41,18 +41,42 @@ object CfhWatch {
                                 }
                             } catch (_: Throwable) {}
                         }
-                        Logger.d(sb.toString())
+                        Logger.probe { sb.toString() }
                     } catch (_: Throwable) {}
                 }
             }
         }
         if (CfhState.laWatchArmed) return
         val xp = CfhState.xpRef ?: return
+        // ★★ ANR 红线加固（审阅 2026-09 · M7）：**绝不能把 hook 挂在 JDK 集合类上**。
+        // 原实现直接 `xp.hook(CopyOnWriteArrayList.getDeclaredMethod("add", ...))`——
+        // 这是**类级 hook**，意味着进程内**所有** COW 列表的每一次写入都要过 Xposed 桥
+        // （ViewTreeObserver 监听器表、各类回调注册表都在高频写 COW）。
+        // 与 armTrueWatch 的护栏（同文件第 112 行 `cn0.startsWith("java.")` 直接 return）
+        // 相比，此处原先缺失 —— 同一个文件里一个函数有护栏、另一个没有。
+        //
+        // 现改为：
+        //   1) 独立开关控制（perf_lawatch，默认关）。原先只靠 Logger.quiet 兜底，
+        //      用户为排查别的问题一开日志就会给全进程 COW 写入装桥 ⇒ ANR 地雷。
+        //      现在「开普通诊断日志」不再触发本插桩，必须显式打开专用的深度开关。
+        //   2) 若 laRef 的运行时类恰是 JDK 类（实测就是 CopyOnWriteArrayList），
+        //      放弃 write-hook，改由 filterVmLists 的周期性清洗兜底（功能不丢，
+        //      只是「前置删除」退化为「落地后清洗」）。
+        if (!Prefs.bool(Prefs.K_PERF_LAWATCH, false)) {
+            Logger.once("lawatch.off", "LAWATCH skipped: perf_lawatch off (default) -> rely on periodic clean")
+            return
+        }
+        val refCls = list.javaClass
+        if (refCls.name.startsWith("java.") || refCls.name.startsWith("android.") || refCls.name.startsWith("kotlin.")) {
+            Logger.once("lawatch.jdk", "LAWATCH skipped: laRef is JDK class ${refCls.name} -> rely on periodic clean")
+            return
+        }
         synchronized(this) {
             if (CfhState.laWatchArmed) return
             CfhState.laWatchArmed = true
             Logger.safe("armLaWatch") {
-                val cow = java.util.concurrent.CopyOnWriteArrayList::class.java
+                // ★ 只挂 laRef 的**真实运行时类**（快手自有类），不再挂 JDK 基类
+                val cow = refCls
                 val specs = listOf(
                     Triple("addAll", arrayOf<Class<*>>(java.util.Collection::class.java), true),
                     Triple("addAllAbsent", arrayOf<Class<*>>(java.util.Collection::class.java), true),
@@ -98,7 +122,7 @@ object CfhWatch {
                         ok++
                     } catch (_: Throwable) {}
                 }
-                Logger.always("LAWATCH armed: ok=$ok/4 (identity filter on l.a)")
+                Logger.once("lawatch.armed", "LAWATCH armed: ok=$ok/4 (identity filter on l.a)")
             }
         }
     }
@@ -239,13 +263,28 @@ object CfhWatch {
         for (ar in CfhState.adpRefs.toList()) roots.add(ar to "ADP2.")
         if (roots.isEmpty()) return
         if (!CfhState.laFindPending.compareAndSet(false, true)) return
-        CfhState.cleanExecutor.execute {
+        // ★ 性能修复（审阅 2026-09 · M4）：改投 searchExecutor（独立于清洗管线），
+        // 避免这条深度 6 的对象图 BFS 把 filterVmLists 的清洗任务饿死
+        CfhState.searchExecutor.execute {
             CfhState.laFindPending.set(false)
             Logger.safe("laFind") {
+                // ★ 性能修复（M4）：把 targets 建身份索引 —— 原实现每个列表元素都要
+                // `targets.any { it === el }` 线性扫最多 24 项（O(n·24)），
+                // 换成 IdentityHashMap 后 O(1)
+                val targetSet: MutableSet<Any> =
+                    java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Any, Boolean>())
+                for (t in targets) targetSet.add(t)
+                // ★ BFS 预算（M4）：深度 6 + 全字段反射的对象图可能极大，
+                // 加硬预算保证任务有界，避免长时间占用线程（清洗靠 keep-latest
+                // 会被顶掉，搜索任务不会——所以必须自带上限）
+                var visited = 0
+                val VISIT_BUDGET = 2000
                 val seen = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Int, Boolean>())
                 fun walk(holder: Any, path: String, depth: Int) {
                 if (depth > 6) return
+                if (visited >= VISIT_BUDGET) return
                 if (!seen.add(System.identityHashCode(holder))) return
+                visited++
                 var c: Class<*>? = holder.javaClass
                 var lvl = 0
                 while (c != null && c != Any::class.java && lvl < 2) {
@@ -264,9 +303,9 @@ object CfhWatch {
                                     for (el in v) {
                                         // 身份命中（retDelQp 已知脏）或直接判脏（rerank 插进
                                         // adapter 的脏项没经过 filterResult，不在 targets 里）
-                                        if (el != null && (targets.any { it === el } || laElDirty(el))) {
+                                        if (el != null && (targetSet.contains(el) || laElDirty(el))) {
                                             hitCnt++
-                                            Logger.d("LAFIND HIT $path${f.name}[${v.indexOf(el)}] size=${v.size} el=${el.javaClass.name}")
+                                            Logger.probe { "LAFIND HIT $path${f.name}[${v.indexOf(el)}] size=${v.size} el=${el.javaClass.name}" }
                                         }
                                     }
                                     // ★ 命中即清：所有含脏项的 List 一律即时 sanitize；
@@ -288,15 +327,15 @@ object CfhWatch {
                                             // 真源存储列表：允许删空（pager 渲染走 V0 快照聚合，
                                             // 存储列表删空不崩；残留 1 项由 size>1 保护留脏）
                                             CfhPurge.sanitizeList(mut, "lafind:$path${f.name}", allowEmpty = true)
-                                            if (mut.size != bs) Logger.d("LAFIND sanitize $path${f.name}: removed=${bs - mut.size} left=${mut.size}")
+                                            if (mut.size != bs) Logger.probe { "LAFIND sanitize $path${f.name}: removed=${bs - mut.size} left=${mut.size}" }
                                         }
                                     }
                                     if (depth < 6) for (el in v) if (el != null && !el.javaClass.name.startsWith("java.")) walk(el, npath + "[].", depth + 1)
                                 }
                                 is Array<*> -> {
                                     for (el in v) {
-                                        if (el != null && (targets.any { it === el } || laElDirty(el))) {
-                                            Logger.d("LAFIND HIT $path${f.name}[] size=${v.size}")
+                                        if (el != null && (targetSet.contains(el) || laElDirty(el))) {
+                                            Logger.probe { "LAFIND HIT $path${f.name}[] size=${v.size}" }
                                         }
                                     }
                                     if (depth < 6) for (el in v) if (el != null && !el.javaClass.name.startsWith("java.")) walk(el, npath + "[].", depth + 1)
@@ -314,7 +353,7 @@ object CfhWatch {
                 }
             }
                 for ((r0, p0) in roots) walk(r0, p0, 0)
-                Logger.d("LAFIND done targets=${targets.size} roots=${roots.size}")
+                Logger.probe { "LAFIND done targets=${targets.size} roots=${roots.size}" }
             }
         }
     }

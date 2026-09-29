@@ -11,6 +11,17 @@ object KsClass {
 
     const val KWAI_REPRESENTATION = "com.kwai.player.KwaiRepresentation"
 
+    // ★ 版本探测用的**结构指纹类**（2026-09 自适应适配）。
+    // 选它们的原则：必须是语义类名（非混淆），且其存在/消失能区分快手的结构世代。
+    // 判据来源见《快手版本适配文档》2.2 节的静态核对结论。
+    //
+    // milano/commonfeedslide 是 14.8 起的 feed 主容器；14.7 及以前用 slideplay 系。
+    const val MILANO_COMMON_FEED_SLIDE =
+        "com.yxcorp.gifshow.detail.fragments.milano.commonfeedslide.network.CommonFeedSlideBidirectionalPageList"
+
+    // 直播 rerank 包（包名稳定，混淆不跨包）—— 供 KsResolve 结构发现用
+    const val PKG_LIVE_RERANK = "com.kuaishou.live.rerank"
+
     // 视频字段候选（混淆容错）
     val VIDEO_URL_FIELDS = arrayOf("videoUrl", "playUrl", "mainUrl", "cdnUrl", "photoUrl", "url", "mUrl")
     val COVER_FIELDS = arrayOf("coverUrl", "webpCover", "poster", "cover", "mCoverUrl")

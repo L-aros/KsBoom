@@ -22,17 +22,36 @@ object PerfHook {
     fun hook(xp: XposedInterface, cl: ClassLoader) {
         hookLogSpam(xp, cl)
         hookSensor(xp)
-        Logger.always("PerfHook installed")
+        Logger.once("perf.installed", "PerfHook installed")
     }
 
     private fun hookLogSpam(xp: XposedInterface, cl: ClassLoader) {
-        if (!Prefs.bool(Prefs.K_PERF_LOGSPAM, true)) return
+        // ★ 默认 true→false（2026-09-30 用户定稿：全关，按需开启）。
+        //   false ⇒ native 刷屏日志拦截不装（原注释称可降 GC 压力 90%），P2P 日志照常输出。
+        if (!Prefs.bool(Prefs.K_PERF_LOGSPAM, false)) return
         var nativeOk = false
         try {
             System.loadLibrary("loghook")
             nativeOk = nativeInitLogHook()
-        } catch (t: Throwable) { Logger.always("native loghook load fail: $t") }
-        Logger.always("perf logspam native=$nativeOk tags=$SPAM_TAGS")
+        } catch (t: Throwable) { Logger.once("perf.nativefail", "native loghook load fail: $t") }
+        Logger.once("perf.logspam", "perf logspam native=$nativeOk tags=$SPAM_TAGS")
+
+        // ★ 性能修复（审阅 2026-09 · L2）：Java 层 `android.util.Log.d` hook
+        // **仅在 native hook 未生效时**才安装，作为降级兜底。
+        //
+        // 原实现两层都装。但 `Log.d` 的实现最终必经 `__android_log_buf_write`
+        // （Log.d → println_native → __android_log_buf_write，bufID=LOG_ID_MAIN），
+        // 因此 native 层对 tag 过滤是**完全覆盖**；而且 native 还多拦一类
+        // 「text 含 Invalid resource ID」（Java 层从未做这个）。
+        // ⇒ Java 层是严格冗余的，代价却是给**全进程最热的方法之一**装 Xposed 桥
+        //   （任何库调用 Log.d 都要过桥 + 构造参数数组）。
+        //
+        // nativeOk=false（个别设备 Dobby 挂载失败）时保留 Java 层兜底，
+        // 保证「刷屏日志拦截」这个开关不会因为 native 失败而完全失效。
+        if (nativeOk) {
+            Logger.once("perf.javaskip", "perf logspam: skip Java Log.d hook (native covers tag filter)")
+            return
+        }
         try {
             val logCls = Class.forName("android.util.Log", false, cl)
             var cnt = 0
@@ -55,8 +74,8 @@ object PerfHook {
                         }
                 }
             }
-            Logger.always("perf logspam java hook methods=$cnt")
-        } catch (t: Throwable) { Logger.always("perf logspam java hook fail: $t") }
+            Logger.once("perf.javafallback", "perf logspam java fallback hook methods=$cnt")
+        } catch (t: Throwable) { Logger.once("perf.javafail", "perf logspam java hook fail: $t") }
     }
 
     private fun hookSensor(xp: XposedInterface) {

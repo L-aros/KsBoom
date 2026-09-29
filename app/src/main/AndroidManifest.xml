@@ -4,11 +4,41 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- ★ 包可见性声明（2026-09 修复「检测不到快手版本 / 打开模块菜单失败」）
+         Android 11（API 30）起，应用默认**只能看到自己**，查询其它包名会抛
+         NameNotFoundException —— 即使那个包确实装着。这不是隐私工具拦截，
+         是系统强制的可见性限制，必须在 manifest 里显式声明 <queries> 才放行。
+         所需能力：
+           - 读快手版本号（getPackageInfo）
+           - 启动快手（getLaunchIntentForPackage）
+         普通版与极速版都列出。 -->
+    <queries>
+        <package android:name="com.smile.gifmaker" />
+        <package android:name="com.kuaishou.nebula" />
+    </queries>
+
     <!-- 配置同步鉴权：signature 级——只有本模块（同证书）能向快手进程内的
          PREFS_UPDATE/PREFS_PULL 接收器投递广播，第三方 app 无法伪造/篡改配置 -->
     <permission
         android:name="io.github.angbang852.manjiao.permission.PREFS_SYNC"
         android:protectionLevel="signature" />
+
+    <!-- ★ 2026-09 关键修复：**必须同时声明 uses-permission**。
+         `registerReceiver(receiver, filter, permission, ...)` 中 permission 参数的语义是
+         「**发送方**必须持有该权限，广播才会被投递给这个接收器」。
+         原先 manifest 只有上面的 <permission>（定义权限），缺少本行（申请权限），
+         于是本 app 自己不持有 PREFS_SYNC ⇒ 它发出的所有定向广播
+         （PREFS_UPDATE / PREFS_PULL / AUDIT_* / OPEN_MENU）全部在系统投递层被丢弃。
+         实测证据：
+           · 系统日志 `Enqueued broadcast ... : 0`（匹配到 0 个接收器）
+           · 接收器侧落盘显示 `recv=OK`（注册确实成功，排除注册失败）
+           · `dumpsys package` 的 requested permissions 里没有 PREFS_SYNC
+         后果：「app → 快手」的单向广播通信从未真正工作过；跨进程配置一直靠
+         媒体目录文件兜底（slowkick.properties）。
+         同证书签名下本行不带来额外风险，只是让本 app 获得「向自己声明的
+         signature 权限发送广播」的资格。 -->
+    <uses-permission
+        android:name="io.github.angbang852.manjiao.permission.PREFS_SYNC" />
 
     <application
         android:allowBackup="false"
@@ -17,14 +47,22 @@
         android:description="@string/module_desc"
         android:theme="@style/Theme.SlowKick">
 
+        <!-- ★ LSPosed「打开模块设置」入口（2026-09 参考 WeKit 补齐）
+             缺这两个 action/category，框架在列表里点「打开」时会找不到我们的入口，
+             只能绕路用广播唤醒快手进程再弹菜单。
+             MODULE_SETTINGS 是 Xposed 生态的公认约定；APPLICATION_PREFERENCES
+             让系统设置里的「应用信息 → 高级 → 应用偏好」也能直达本页。 -->
         <activity
             android:name=".ui.SettingsActivity"
             android:exported="true"
-
             android:label="@string/app_name">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.APPLICATION_PREFERENCES" />
+                <category android:name="de.robv.android.xposed.category.MODULE_SETTINGS" />
             </intent-filter>
         </activity>
 
@@ -35,6 +73,14 @@
             <intent-filter>
                 <action android:name="io.github.angbang852.manjiao.PREFS_WRITE" />
                 <action android:name="io.github.angbang852.manjiao.PREFS_QUERY" />
+                <!-- ★ 钥匙备份交还（2026-09-30 A②）：快手侧本地钥匙丢了时来取 app 这份备份。
+                     必须是 **manifest 声明**的 action，不能只靠运行时注册 —— 模块 app 平时
+                     根本没在运行（只在用户打开设置页时活着），而钥匙丢失的那一刻正是
+                     「快手刚被清数据、用户第一次打开快手」，此时只有 manifest 接收器能被
+                     显式广播（setPackage 定向而来，不受 Android 8+ 隐式广播限制）把进程拉起来。
+                     安全性：回包去向在 KeyVault.replyKeyBack 里**写死**为快手两个包，
+                     请求方无法指定收件人 ⇒ 第三方 app 触发本接收器也拿不到钥匙。 -->
+                <action android:name="io.github.angbang852.manjiao.KEY_PULL" />
             </intent-filter>
         </receiver>
 
@@ -43,6 +89,17 @@
             android:authorities="${applicationId}.XposedService"
             android:exported="true"
             tools:ignore="ExportedContentProvider" />
+
+        <!-- 框架识别模块身份。xposedminversion 对齐 libxposed 传统 API 51
+             （本项目实际跑在 libxposed API 102，51 是模块声明的**最低可运行**版本，
+             与 WeKit 的 module.prop minApiVersion=51 一致）。 -->
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+
+        <meta-data
+            android:name="xposedminversion"
+            android:value="51" />
 
         <meta-data
             android:name="xposeddescription"

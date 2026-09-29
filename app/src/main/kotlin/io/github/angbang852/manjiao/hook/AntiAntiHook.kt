@@ -20,8 +20,13 @@ object AntiAntiHook {
 
     fun hook(xp: XposedInterface, cl: ClassLoader) {
         // ★ 接通「绕过环境检测」开关：K_ANTI 此前定义后无任何消费点（死开关，
-        // UI 拨了也没用）；默认 true 保持既有行为
-        if (!Prefs.bool(Prefs.K_ANTI, true)) { Logger.d("AntiAnti disabled by config"); return }
+        // UI 拨了也没用）。
+        // ★★ 默认 true→false（2026-09-30 用户定稿：「全关肯定是都关啊，用的人按需开启啊。」）
+        //   false ⇒ 反环境检测整体不装（getPackageInfo/File/exec/debug/prop 五路全不 hook）。
+        //   ⚠️ 本开关**没有 UI 入口**（全项目只有 Prefs.kt:40 常量、PrefsWriteReceiver 白名单、
+        //      这里一处消费）⇒ 本机 anti_detect 未显式存值，这项真的关掉了，
+        //      要重新打开只能用 adb 写 true（见下方广播命令）。
+        if (!Prefs.bool(Prefs.K_ANTI, false)) { Logger.d("AntiAnti disabled by config"); return }
         hookPm(xp, cl); hookFile(xp); hookExec(xp); hookDebug(xp); hookProp(xp)
         Logger.d("AntiAnti installed")
     }

@@ -10,6 +10,7 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.os.Build
 import android.widget.FrameLayout
+import io.github.angbang852.manjiao.util.Logger
 import kotlin.math.max
 
 /**
@@ -63,10 +64,17 @@ class GlassPanel(
 
     init {
         setWillNotDraw(false)
-        // ★ 软件层（审阅 2026-09 P2）：Paint.setShadowLayer 对 Path 的投影只在
-        // software layer 画布渲染——硬件加速下 shadowPad 预留的 14dp 空间里阴影
-        // 不可见（白预留）。面板面积小，软件层代价可接受
-        setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
+        // ★ 性能专项（2026-09-23）：**不再对容器设 LAYER_TYPE_SOFTWARE**。
+        //
+        // 原实现（审阅 2026-09 P2）为了让 Paint.setShadowLayer 画在 Path 上的投影
+        // 可见，给 GlassPanel 整体设了软件层。但软件层在 Android 里是**整棵子树的
+        // 合成画布**——面板里的 header、10 行菜单、每个带 setShadowLayer 的 TextView
+        // 全部退化为 CPU 绘制。实测菜单打开：8 秒内只出 7 帧且 100% janky、
+        // 90th=300ms（≈2 秒级冻结窗口），其中构建仅 130ms，其余是软件绘制的持续代价。
+        //
+        // 现改为：**投影预渲染成一张 Bitmap**（在软件 Canvas 上画一次，仅尺寸变化时重画），
+        // 容器回到硬件加速。每帧只剩 drawBitmap(投影) + 三笔 path，子树走 GPU。
+        // 观感与原实现一致（同一套 setShadowLayer 参数、同一 shadowPad 预留）。
         setPadding(shadowPad, shadowPad, shadowPad, shadowPad)
         // KernelSU: dropShadow(radius = 10.dp, alpha = dark ? 0.2f : 0.1f)
         shadowPaint.color = 0xFF000000.toInt()
@@ -79,6 +87,48 @@ class GlassPanel(
         // rim highlight 1dp
         rimPaint.strokeWidth = max(density, 0.75f)
         rimPaint.color = if (dark) 0x1FFFFFFF else 0x2EFFFFFF
+    }
+
+    /** 预渲染的投影位图（尺寸变化时重画；平时每帧只 drawBitmap） */
+    private var shadowBitmap: android.graphics.Bitmap? = null
+
+    /**
+     * A/B 对照用：把容器切回软件层（旧行为）或硬件层（新行为）。
+     *
+     * 尺寸变化与 `Logger.diag` 翻转时都会重新应用；`diag=true` 时不生成位图，
+     * 走每帧 drawPath + 软件画布（= 改动前的绘制路径），用于同一时间窗内对照。
+     */
+    private fun applyLayerMode(w: Int, h: Int) {
+        if (Logger.diag) {
+            setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
+            shadowBitmap?.recycle()
+            shadowBitmap = null
+        } else {
+            setLayerType(android.view.View.LAYER_TYPE_NONE, null)
+            if (w > 0 && h > 0) rebuildShadowBitmap(w, h)
+        }
+    }
+
+    /**
+     * 把投影画进一张位图。
+     *
+     * 为什么需要：`Paint.setShadowLayer` 对 `Path` 的模糊只在**软件画布**生效
+     * （硬件加速下不渲染）。原实现整个容器开软件层换取投影，代价是子树全部 CPU 绘制；
+     * 现在只在一张内存位上用软件画布跑一次模糊，之后硬件合成 —— 两全。
+     */
+    private fun rebuildShadowBitmap(w: Int, h: Int) {
+        try {
+            val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            val c = android.graphics.Canvas(bmp)
+            val save = c.save()
+            c.clipOutPath(shape)          // pill 区域挖除防黑边（同原 drawDropShadow）
+            c.drawPath(shape, shadowPaint)
+            c.restoreToCount(save)
+            shadowBitmap?.recycle()
+            shadowBitmap = bmp
+        } catch (_: Throwable) {
+            shadowBitmap = null
+        }
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -97,11 +147,27 @@ class GlassPanel(
             if (dark) 0x1FFFFFFF else 0x30FFFFFF,
             0x00FFFFFF, Shader.TileMode.CLAMP
         )
+        // 绘制模式（硬件层 + 预渲染投影位图；diag=true 时退回旧软件层路径）
+        applyLayerMode(w, h)
+    }
+
+    /** 上一次应用的模式（diag 翻转时重应用，供 A/B 对照） */
+    private var lastDiagMode = false
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        lastDiagMode = Logger.diag
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         if (width <= 0 || height <= 0) return
+        // diag 在挂载后被翻转（A/B 对照）→ 重应用图层模式与位图
+        if (lastDiagMode != Logger.diag) {
+            lastDiagMode = Logger.diag
+            applyLayerMode(width, height)
+            invalidate()
+        }
         drawDropShadow(canvas)
         // 原版表面层只有三笔：wash → gloss → rim(1dp)。bevel/glint 已删
         // （直透模式的假光感，有真模糊后是多余的粗边框）
@@ -114,9 +180,29 @@ class GlassPanel(
         canvas.restore()
     }
 
-    /** HostLayout.drawPillShadow：不透明圆角矩形只为投影，pill 区域挖除防黑边。 */
+    /**
+     * HostLayout.drawPillShadow：不透明圆角矩形只为投影，pill 区域挖除防黑边。
+     *
+     * ★ 性能专项（2026-09-23）：改为贴预先渲染好的投影位图（硬件加速下可正常合成）。
+     * 位图未就绪（尺寸为 0 或分配失败）时退回软件路径绘制，保证观感不丢。
+     */
     private fun drawDropShadow(canvas: Canvas) {
         if (Build.VERSION.SDK_INT < 26) return
+        // ★ A/B 对照开关（性能专项 2026-09-23）：diag=true 时走**旧路径**
+        //（容器软件层 + 每帧 drawPath 画投影），便于同一时间窗内对照两种绘制方式的
+        // 菜单打开耗时；diag=false（默认）走预渲染位图路径。
+        if (Logger.diag) {
+            val save = canvas.save()
+            canvas.clipOutPath(shape)
+            canvas.drawPath(shape, shadowPaint)
+            canvas.restoreToCount(save)
+            return
+        }
+        val bmp = shadowBitmap
+        if (bmp != null && !bmp.isRecycled) {
+            canvas.drawBitmap(bmp, 0f, 0f, null)
+            return
+        }
         val save = canvas.save()
         canvas.clipOutPath(shape)
         canvas.drawPath(shape, shadowPaint)

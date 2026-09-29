@@ -32,7 +32,7 @@ object CfhSwap {
             if (CfhState.cleanQueue.size >= 12) CfhState.cleanQueue.removeFirst()
             CfhState.cleanQueue.add(qp)
         }
-        // 持久缓存：跨窗口不排空，兜底替换�?
+        // 持久缓存：跨窗口不排空，兜底替换用。?
         synchronized(CfhState.cleanCachePersist) {
             if (CfhState.cleanCachePersist.none { it === qp }) {
                 if (CfhState.cleanCachePersist.size >= 60) CfhState.cleanCachePersist.removeFirst()
@@ -83,7 +83,7 @@ object CfhSwap {
         val vm = CfhState.vmRef
         if (vm == null) return null
         pickFromQueue()?.let { return it }
-        // 轻量补充：仅�?VM 窗口字段 i（不�?T0/U0，避免反射副作用/异常�?
+// 轻量补充：仅查 VM 窗口字段 i（不碰 T0/U0，避免反射副作用/异常）。
         CfhState.inFindClean = true
         try {
             val i = try { Reflect.readAny(vm, "i") } catch (_: Throwable) { null }
@@ -164,40 +164,43 @@ object CfhSwap {
             var c2: Class<*>? = adp.javaClass
             var lvl2 = 0
             while (c2 != null && c2 != Any::class.java && lvl2 < 4) {
-                for (f in c2!!.declaredFields) {
+                // ★ 性能修复（审阅 2026-09 · M6）：改字段表为缓存版本
+                // （Reflect.nonStaticFields 按类缓存 Array<Field> 并预置 accessible），
+                // 不再每次 declaredFields 复制数组 + 逐字段 isAccessible
+                for (f in Reflect.nonStaticFields(c2!!)) {
                     if (java.lang.reflect.Modifier.isStatic(f.modifiers)) continue
                     try {
                         f.isAccessible = true
                         val v = f.get(adp)
                         if (v is MutableList<*> && v.size > 0) {
-
-                            val hits = v.filter { it != null && CfhProbe.findQpInObject(it)?.let { q -> CfhDecide.shouldFilterFeed(q) } == true }
-                            if (hits.isNotEmpty() && v.size - hits.size >= 1) {
-                                val cap0 = hits.firstOrNull()?.let { CfhProbe.findQpInObject(it)?.let { q -> CfhUtil.readCaption(q) } }
-                                Logger.d("adpSelfFix ${f.name} fixed=${hits.size} cap0=${cap0?.take(14)}")
-                                var fixed = 0
-                                for (i in 0 until v.size) {
-                                    val el = v[i] ?: continue
-                                    val eq = CfhProbe.findQpInObject(el)
-                                    if (eq != null && CfhDecide.shouldFilterFeed(eq)) {
-                                        val cleanQp = findCleanQp()
-                                        if (cleanQp != null) {
-                                            val sw = try { writeQpInto(el, cleanQp) } catch (_: Throwable) { 0 }
-                                            val sw2 = if (sw == 0 && CfhState.qpClassRef?.isAssignableFrom(el.javaClass) == true) {
-                                                try { @Suppress("UNCHECKED_CAST") (v as MutableList<Any?>)[i] = cleanQp; 1 } catch (_: Throwable) { 0 }
-                                            } else sw
-                                            fixed += if (sw2 > 0) 1 else 0
-                                        }
-                                    }
+                            // ★★ 只删不换（2026-09-25 用户定稿）：adapter 自持列表里的
+                            //   脏项直接移除（保留至少 1 项），不再用 writeQpInto 替换 ——
+                            //   替换制造「净视频+脏文字」错配。干净项入池职责保留
+                            //   （供 scrub/记录等只读用途）。
+                            var fixed = 0
+                            var dirtySeen = 0
+                            // 单遍：一次 findQpInObject 决定「脏 → 删」或「净 → 入池」
+                            @Suppress("UNCHECKED_CAST")
+                            val ml = v as MutableList<Any?>
+                            var i = ml.size - 1
+                            while (i >= 0) {
+                                if (ml.size <= 1) break   // 护栏：至少留 1 项
+                                val el = ml[i]
+                                if (el == null) { ml.removeAt(i); i--; continue }
+                                val q = CfhProbe.findQpInObject(el)
+                                if (q == null) { i--; continue }
+                                if (CfhDecide.shouldFilterFeed(q)) {
+                                    dirtySeen++
+                                    // [已移除 2026-09-26] scrubShownDirty：功能早已删除，调用点清理
+                                    ml.removeAt(i)
+                                    fixed++
+                                } else {
+                                    try { offerClean(q) } catch (_: Throwable) {}
                                 }
-                                if (fixed > 0) {
-                                    Logger.d("adpSelfFixAl ${f.name} fixed=$fixed sz=${v.size}")
-                                    try { Reflect.callMethod(adp, "notifyDataSetChanged") } catch (_: Throwable) {}
-                                }
+                                i--
                             }
-                            // 幸存干净项入池补充队列
-                            for (el in v) {
-                                el?.let { e -> CfhProbe.findQpInObject(e)?.let { q -> if (!CfhDecide.shouldFilterFeed(q)) { try { offerClean(q) } catch (_: Throwable) {} } } }
+                            if (fixed > 0) {
+                                Logger.d("adpSelfFixDel ${f.name} removed=$fixed sz=${ml.size}")
                             }
                         }
                     } catch (_: Throwable) {}

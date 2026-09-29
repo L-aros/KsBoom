@@ -163,10 +163,13 @@ object GestureHook {
             1 -> {
                 tapState = 2
                 val noDblLike = Prefs.bool(Prefs.K_GS_NO_DBL_LIKE, false) && inVideoArea
-                val openComment2 = Prefs.bool(Prefs.K_GS_OPEN_COMMENT, false) &&
-                    Prefs.int(Prefs.K_GS_OPEN_COMMENT_TAPS, 2) == 2 && inCommentArea
-                val openMenu2 = Prefs.bool(Prefs.K_GS_OPEN_MENU, false) &&
-                    Prefs.int(Prefs.K_GS_OPEN_MENU_TAPS, 2) == 2 && inMenuArea
+                // ★ 三击功能已废弃（2026-09 用户确认）：原先这里是
+                //   `Prefs.int(K_GS_OPEN_COMMENT_TAPS, 2) == 2`，配合 tapState==2 分支
+                //   实现三击链。但全项目从无任何 UI 设置该键（值恒为默认 2），
+                //   `== 3` 分支永不可达 —— 属死逻辑。此处直接按「双击」处理，
+                //   并删除 tapState==2 的三击分支与 tripleArmed 续链判定。
+                val openComment2 = Prefs.bool(Prefs.K_GS_OPEN_COMMENT, false) && inCommentArea
+                val openMenu2 = Prefs.bool(Prefs.K_GS_OPEN_MENU, false) && inMenuArea
                 Logger.d("gs: double-tap detected noDblLike=$noDblLike oc=$openComment2 om=$openMenu2")
                 if (noDblLike || openComment2 || openMenu2) {
                     // 消费第二击 DOWN（含后续 MOVE/UP）：快手双击点赞在 DOWN 触发，
@@ -177,29 +180,7 @@ object GestureHook {
                     // 起算漂移；后续 DOWN 与快手已见第 1 击链成双击误点赞）
                     lastTapTime = now; lastTapX = ev.x; lastTapY = ev.y
                     lastConsumeAt = now
-                    // ★ 三击功能开启时保持 tapState=2 继续链（原实现清零导致
-                    // noDblLike+三击配置下三击永不触发）
-                    val tripleArmed = (Prefs.bool(Prefs.K_GS_OPEN_COMMENT, false) &&
-                        Prefs.int(Prefs.K_GS_OPEN_COMMENT_TAPS, 2) == 3) ||
-                        (Prefs.bool(Prefs.K_GS_OPEN_MENU, false) &&
-                            Prefs.int(Prefs.K_GS_OPEN_MENU_TAPS, 2) == 3)
-                    if (!tripleArmed) tapState = 0
-                    return true
-                }
-                return false
-            }
-            2 -> {
-                tapState = 0
-                val openComment3 = Prefs.bool(Prefs.K_GS_OPEN_COMMENT, false) &&
-                    Prefs.int(Prefs.K_GS_OPEN_COMMENT_TAPS, 2) == 3 && inCommentArea
-                val openMenu3 = Prefs.bool(Prefs.K_GS_OPEN_MENU, false) &&
-                    Prefs.int(Prefs.K_GS_OPEN_MENU_TAPS, 2) == 3 && inMenuArea
-                if (openComment3 || openMenu3) {
-                    Logger.d("gs: triple-tap oc=$openComment3 om=$openMenu3")
-                    lastTapTime = now; lastTapX = ev.x; lastTapY = ev.y
-                    lastConsumeAt = now
-                    if (openComment3) openCommentPanel(act)
-                    else if (openMenu3) MainMenuDialog.show(act)
+                    tapState = 0
                     return true
                 }
                 return false

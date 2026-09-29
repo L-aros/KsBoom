@@ -28,8 +28,7 @@ object CfhCapture {
         return synchronized(CfhState.visRing) { CfhState.visRing.toList().reversed() }
     }
 
-    fun currentFeedPhoto(): Any? {
-        // ★ 主源：Fragment 自身页号 × 适配器供给映射。实证 Fragment 的 M 字段在播放
+    fun currentFeedPhoto(): Any? {        // ★ 主源：Fragment 自身页号 × 适配器供给映射。实证 Fragment 的 M 字段在播放
         // 开始时就被预绑定为下一视频（视图可见性再准也读不到正在播的），而 D(pos)
         // 供给映射记录的是「该页本来的视频」。Fragment 的页号 = 其 Int 字段中能命中
         // 供给映射键的那个
@@ -101,8 +100,17 @@ object CfhCapture {
             }
         } catch (_: Throwable) {}
         try {
-            val keys = synchronized(CfhState.posPhotoMap) { CfhState.posPhotoMap.keys.toList().takeLast(6) }
-            Logger.always("DLCAP via=$bestVia keys=$keys cap=${best?.let { CfhUtil.readCaption(it)?.take(16) }}")
+            // ★ 性能修复（审阅 2026-09 · M1）：本函数被 sanitizeList / filterVmListsInner
+            // 等清洗热路径反复调用（每轮清洗一次），原先无条件 always 输出——
+            // 参数字符串含 readCaption 反射与 posPhotoMap 加锁取键，全部在
+            // Logger 决策之前求值。改为限次 + 惰性求值。
+            if (CfhState.dlCapDiag < 30) {
+                CfhState.dlCapDiag++
+                Logger.probe {
+                    val keys = synchronized(CfhState.posPhotoMap) { CfhState.posPhotoMap.keys.toList().takeLast(6) }
+                    "DLCAP via=$bestVia keys=$keys cap=${best?.let { CfhUtil.readCaption(it)?.take(16) }}"
+                }
+            }
         } catch (_: Throwable) {}
         return best
     }
@@ -180,7 +188,9 @@ object CfhCapture {
         for (id in ids) {
             val p = findPhotoById(id)
             if (p != null) {
-                Logger.always("DL ownpid: $id matched cap=${CfhUtil.readCaption(p)?.take(14)}")
+                // ★ 性能修复（审阅 2026-09 · M1）：本函数（fragmentOwnPhoto → currentFeedPhoto）
+                // 走在下载捕获与清洗热路径上，限次 + 惰性求值。
+                if (CfhState.dlOwnPidDiag < 20) { CfhState.dlOwnPidDiag++; Logger.d { "DL ownpid: $id matched cap=${CfhUtil.readCaption(p)?.take(14)}" } }
                 return p
             }
         }
@@ -245,7 +255,7 @@ object CfhCapture {
             val adCls = mAd?.javaClass?.simpleName ?: ""
             val capEsc = cap.replace('\n', ' ').take(38)
             Logger.d("DATA ent=$eid pm=$pmCls cap=\"$capEsc\" user=$user type=$type like=$like cmt=$cmt ai=$ai live=${live != null} sid=$sid living=$living adCls=$adCls nativeD=${nativeD != null} novel=${novel != null} ltos=${ltos != null} serial=${serial != null} column=${column != null} adNovel=${adNovel != null} tubeI=$tubeInfo tubeT=$tubeTag vid=$vid long=$longVid idx=$idx comm=$comm kwApp=$kwApp atlasT=$atlasT atlasText=$atlasText entType=$entType entDisp=$entDisp qpType=$qpType")
-            // 直播卡：dump 全部字段找特�?
+            // 直播卡：dump 全部字段找特征。?
             if (ent.javaClass.name.contains("LiveStreamFeed")) {
                 val ik = System.identityHashCode(ent)
                 if (CfhState.liveDumped.add(ik)) {
@@ -255,7 +265,7 @@ object CfhCapture {
                     }
                 }
             }
-            // 广告/影视卡：dump 内层标题元数�?
+            // 广告/影视卡：dump 内层标题元数据。?
             if (serial != null || column != null || adNovel != null || nativeD != null || ltos != null) {
                 val ik = System.identityHashCode(ent)
                 if (CfhState.dramaDumped.add(ik)) {

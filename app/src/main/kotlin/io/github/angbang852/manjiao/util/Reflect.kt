@@ -7,8 +7,19 @@ object Reflect {
     // ★ Field 缓存（Toki 式 O(1) 读）：判定路径每秒对列表逐项读几十个字段，无缓存时
     // getDeclaredField 现场查找+NoSuchFieldException 异常创建（栈填充极贵）是 GC 风暴根因。
     // 负缓存同样关键：真不存在的字段此前每次查询都抛异常
-    private val fieldCache = java.util.concurrent.ConcurrentHashMap<String, Field>()
-    private val negCache = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+    //
+    // ★ 性能修复（2026-09-30）：外层缓存键由「现场拼出来的 String」改为 **Class 对象本身**。
+    //   · 为什么值得改：`readAny` 是**全部判定成本的公共乘数**（shouldFilterFeed 一次
+    //     合计 20+ 次调用），而原实现**每次调用**都要拼键
+    //     `cls.name + "@" + identityHashCode(loader) + "#" + 字段名` —— 缓存命中时
+    //     主要开销就是这次 StringBuilder 拼接 + String 分配 + 长串 hashCode。
+    //   · 改后：命中路径只做 Class 表查找 + 字段名查找，**零字符串分配**
+    //     （字段名来自调用处字面量，本就存在）。
+    //   · 语义等价性（已核对，无碰撞）：Class 对象的身份 = (类名 + 定义它的 ClassLoader) 身份，
+    //     与原键的两个维度一一对应；**不同 loader 装载的同名类是不同 Class 对象**，
+    //     所以不可能发生跨 loader 键碰撞（原先靠键里带 loader 身份隔离的那个问题依然被隔离）。
+    private val fieldCache = java.util.concurrent.ConcurrentHashMap<Class<*>, java.util.concurrent.ConcurrentHashMap<String, Field>>()
+    private val negCache = java.util.concurrent.ConcurrentHashMap<Class<*>, MutableSet<String>>()
     private val methodCache = java.util.concurrent.ConcurrentHashMap<String, Method>()
     private val negMethodCache = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
 
@@ -32,17 +43,34 @@ object Reflect {
         Class.forName(name, false, cl)
     } catch (_: Throwable) { null }
 
+    /** 取（必要时惰性创建）某类的「字段名 → Field」表。只在**未命中**时调用。 */
+    private fun fieldsOf(cls: Class<*>): java.util.concurrent.ConcurrentHashMap<String, Field> {
+        val ex = fieldCache[cls]
+        if (ex != null) return ex
+        val created = java.util.concurrent.ConcurrentHashMap<String, Field>()
+        return fieldCache.putIfAbsent(cls, created) ?: created
+    }
+
+    /** 取（必要时惰性创建）某类的「已知不存在字段」负缓存集合。只在**未命中**时调用。 */
+    private fun negOf(cls: Class<*>): MutableSet<String> {
+        val ex = negCache[cls]
+        if (ex != null) return ex
+        val created: MutableSet<String> =
+            java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+        return negCache.putIfAbsent(cls, created) ?: created
+    }
+
     fun readAny(obj: Any?, vararg names: String): Any? {
         if (obj == null) return null
         val start = obj.javaClass
+        // ★ 键就是 Class 对象（见上方缓存声明处的说明）：命中路径不再拼字符串。
+        //   类级表在整个进程生命周期内身份不变，故可在循环外取一次。
+        val hit = fieldCache[start]
+        val neg = negCache[start]
         for (n in names) {
-            // ★ 键含 classloader 身份：快手插件化会把同名类装进第二个 loader，
-            // 按类名做键会让 A loader 的 Field 缓存污染 B loader（get 抛
-            // IllegalArgumentException → 恒 null 且永不重解析）
-            val key = start.name + "@" + System.identityHashCode(start.classLoader) + "#" + n
-            val cached = fieldCache[key]
+            val cached = hit?.get(n)
             if (cached != null) return try { cached.get(obj) } catch (_: Throwable) { null }
-            if (negCache.contains(key)) continue
+            if (neg != null && neg.contains(n)) continue
             var c: Class<*>? = start
             var found: Field? = null
             while (c != null && c != Any::class.java) {
@@ -51,10 +79,10 @@ object Reflect {
                 c = c.superclass
             }
             if (found != null) {
-                fieldCache[key] = found
+                fieldsOf(start)[n] = found
                 return try { found.get(obj) } catch (_: Throwable) { null }
             }
-            negCache.add(key)
+            negOf(start).add(n)
         }
         return null
     }
